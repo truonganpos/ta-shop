@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
     const FIREBASE_MAIN_CONFIG = {
         apiKey: "AIzaSyDseIwSnCWfNCqZItMiQ8svZRLWyYOTtJY",
         authDomain: "shop-truongan.firebaseapp.com",
@@ -20,29 +20,47 @@
         appId: "1:502189174580:web:fefd117131cdd5ddeabf61",
         measurementId: "G-EDB7KCMY7Q"
     };
+    const DEFAULT_CATALOG_SHARD_CONFIGS = [
+        {
+            label: "Catalog 1",
+            appName: "RetailCatalog",
+            config: FIREBASE_CATALOG_CONFIG
+        }
+    ];
+    const PRODUCT_DETAIL_GAS_URL = "https://script.google.com/macros/s/AKfycbyYGE5lb_Ag6pEa9YT8C31tbk4-lCMu0brWzhqbYo-F3gybmQnRn6Lw8KSFTKGji69Urg/exec";
+    const PRODUCT_DETAIL_SHEET_ID = "1sQtuh32Leh3SKB2k3l4D3vXUQyZSMCYdWlaqB-i2DLM";
+    const PRODUCT_DETAIL_SHEET_NAME = "Product_Details";
+    const PRODUCT_DETAIL_CACHE_TTL = 60 * 1000;
 
     const STORAGE_KEYS = {
         catalog: "ta_catalog_cache_v6",
+        productDetails: "ta_product_detail_sheet_v1",
         profile: "ta_customer_profile_v2",
         orders: "ta_orders_cache_v2",
         loginEmail: "ta_last_login_email_v1",
         customerId: "ta_customer_id_v1",
         phoneLoginMap: "ta_phone_login_map_v1"
     };
+    const productDetailState = {
+        lookup: {},
+        promise: null,
+        loadedAt: 0
+    };
 
     const CUSTOMER_PHONE_DOMAIN = String(window.CUSTOMER_PHONE_DOMAIN || "truongan.com").replace(/^@+/, "").trim().toLowerCase();
     const DEFAULT_PAGE_SIZE = 24;
     const DEFAULT_ORDER_LIMIT = 30;
+    const LIVE_ORDER_SUMMARY_LIMIT = 40;
 
     const keyMapObj = {
         id: "i", name: "n", price: "p", stock: "s", date: "d", note: "nt", status: "st", barcode: "b",
         kho: "k", gia_ban_le: "gl", gia_si: "gs", si_tu: "su", gia_goc: "gg", km_phan_tram: "km", vat: "v",
         ton_kho: "tk", dang_dat: "dd", link_anh: "im", cap_nhat_cuoi: "cu", ngay_tao: "nta", variants: "vr",
-        starred: "sr", tags: "tg", group: "gr", customer_id: "ci", customer_name: "cn", total_amount: "ta",
+        starred: "sr", tags: "tg", group: "gr", don_vi_tinh: "dv", unit: "u", ai_hint: "ah", mo_ta: "mt", customer_id: "ci", customer_name: "cn", total_amount: "ta",
         subtotal: "sb", discount_percent: "dp", vat_rate: "vtr", shipping_fee: "sf", shipping_payer: "sp",
         creator: "cr", paid_amount: "pa", debt: "db", source: "sc", shipping_info: "si", payment_method: "pm",
         carrier: "ca", tracking_code: "tc", last_update: "lu", items: "it", qty: "q", discount: "dc",
-        phone: "ph", email: "em", address: "ad", fb: "fb", avatar: "av", pass: "pw", token: "tkc", payments: "py",
+        phone: "ph", email: "em", address: "ad", fb: "fb", avatar: "av", pass: "pw", token: "tkc", payments: "py", gender: "gt", birthday: "ns", zalo: "z",
         total_debt: "td", paid_debt: "pd", total_orders: "to", total_buy: "tb", amount: "am", sort_ts: "ts",
         auth_uid: "au", customer_auth_uid: "cau", owner_uid: "ou"
     };
@@ -51,6 +69,12 @@
     Object.keys(keyMapObj).forEach(function (key) {
         reverseKeyMap[keyMapObj[key]] = key;
     });
+    reverseKeyMap.dvt = "don_vi_tinh";
+    reverseKeyMap.un = "unit";
+    reverseKeyMap.mt = "mo_ta";
+    reverseKeyMap.gd = "gender";
+    reverseKeyMap.bdy = "birthday";
+    reverseKeyMap.zl = "zalo";
 
     function safeParse(raw, fallbackValue) {
         try {
@@ -74,6 +98,292 @@
         try {
             localStorage.setItem(key, JSON.stringify(value));
         } catch (error) {}
+    }
+
+    function sanitizeCatalogShardLinePart(value) {
+        return String(value || "").trim();
+    }
+
+    function parseCatalogShardConfigText(rawText) {
+        return String(rawText || "")
+            .split(/\r?\n/)
+            .map(function (line) { return line.trim(); })
+            .filter(Boolean)
+            .map(function (line, index) {
+                const parts = line.split("|").map(sanitizeCatalogShardLinePart);
+                if (parts.length < 8) return null;
+                return {
+                    label: parts[0] || ("Catalog " + String(index + 1)),
+                    appName: "RetailCatalogShard" + String(index + 1),
+                    config: {
+                        apiKey: parts[1] || "",
+                        authDomain: parts[2] || "",
+                        databaseURL: parts[3] || "",
+                        projectId: parts[4] || "",
+                        storageBucket: parts[5] || "",
+                        messagingSenderId: parts[6] || "",
+                        appId: parts[7] || "",
+                        measurementId: parts[8] || ""
+                    }
+                };
+            })
+            .filter(function (entry) {
+                return entry && entry.config && entry.config.databaseURL && entry.config.apiKey && entry.config.projectId;
+            });
+    }
+
+    function getCatalogShardEntriesFromSettings(rawSettings) {
+        const settings = rawSettings && typeof rawSettings === "object" ? rawSettings : {};
+        const catalogStorage = settings.catalogStorage && typeof settings.catalogStorage === "object" ? settings.catalogStorage : {};
+        const parsed = parseCatalogShardConfigText(catalogStorage.shardsText || "");
+        const merged = DEFAULT_CATALOG_SHARD_CONFIGS.map(function (entry) {
+            return {
+                label: entry.label,
+                appName: entry.appName,
+                config: Object.assign({}, entry.config)
+            };
+        });
+        parsed.forEach(function (entry) {
+            const nextUrl = String(entry && entry.config && entry.config.databaseURL || "").trim();
+            if (!nextUrl) return;
+            const duplicated = merged.some(function (existingEntry) {
+                return String(existingEntry && existingEntry.config && existingEntry.config.databaseURL || "").trim() === nextUrl;
+            });
+            if (!duplicated) merged.push(entry);
+        });
+        return merged.map(function (entry, index) {
+            return {
+                label: entry.label || ("Catalog " + String(index + 1)),
+                appName: index === 0 ? "RetailCatalog" : ("RetailCatalogShard" + String(index + 1)),
+                config: Object.assign({}, entry.config || {})
+            };
+        });
+    }
+
+    function getFirebaseConfigSignature(config) {
+        const safeConfig = config && typeof config === "object" ? config : {};
+        return [
+            String(safeConfig.databaseURL || "").trim().toLowerCase(),
+            String(safeConfig.apiKey || "").trim(),
+            String(safeConfig.projectId || "").trim(),
+            String(safeConfig.appId || "").trim(),
+            String(safeConfig.authDomain || "").trim().toLowerCase()
+        ].join("|");
+    }
+
+    function getFirebaseRuntimeAppName(appName, config) {
+        const baseName = String(appName || "RetailCatalog").trim() || "RetailCatalog";
+        const signature = getFirebaseConfigSignature(config) || "default";
+        const safeSuffix = signature.replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "").slice(0, 48) || "default";
+        return baseName + "_" + safeSuffix;
+    }
+
+    function getCatalogShardConfigSignature(entries) {
+        return JSON.stringify((Array.isArray(entries) ? entries : []).map(function (entry) {
+            const config = entry && entry.config ? entry.config : {};
+            return {
+                label: String(entry && entry.label || "").trim(),
+                signature: getFirebaseConfigSignature(config)
+            };
+        }));
+    }
+
+    function getOrInitNamedFirebaseApp(appName, config) {
+        const runtimeName = getFirebaseRuntimeAppName(appName, config);
+        const signature = getFirebaseConfigSignature(config);
+        if (firebase.apps && firebase.apps.length) {
+            for (let index = 0; index < firebase.apps.length; index += 1) {
+                const existingApp = firebase.apps[index];
+                const existingSignature = String(existingApp.__tasConfigSignature || getFirebaseConfigSignature(existingApp.options || ""));
+                if ((existingApp.name === runtimeName || existingApp.name === appName) && existingSignature === signature) {
+                    existingApp.__tasConfigSignature = signature;
+                    existingApp.__tasBaseName = String(appName || "").trim();
+                    return existingApp;
+                }
+            }
+        }
+        const nextApp = firebase.initializeApp(config, runtimeName);
+        nextApp.__tasConfigSignature = signature;
+        nextApp.__tasBaseName = String(appName || "").trim();
+        return nextApp;
+    }
+
+    function normalizeVariantSheetList(rawVariants) {
+        let parsed = rawVariants;
+        if (typeof parsed === "string") {
+            const jsonParsed = safeParse(parsed, null);
+            parsed = jsonParsed !== null ? jsonParsed : [];
+        }
+        if (parsed && !Array.isArray(parsed) && typeof parsed === "object") {
+            parsed = Object.keys(parsed).map(function (key) { return parsed[key]; });
+        }
+        if (!Array.isArray(parsed)) return [];
+        return parsed.map(function (variant) {
+            const nextVariant = Object.assign({}, variant || {});
+            const image = String((nextVariant.image || nextVariant.link_anh || nextVariant.img) || "").trim();
+            if (image) {
+                nextVariant.image = image;
+                nextVariant.link_anh = image;
+            }
+            return nextVariant;
+        }).filter(function (variant) {
+            return variant && Object.keys(variant).length > 0;
+        });
+    }
+
+    function getProductDetailSheetConfig() {
+        const sharedSettings = readStorage("tas_sys_settings", {}) || {};
+        const aiVision = sharedSettings.aiVision && typeof sharedSettings.aiVision === "object" ? sharedSettings.aiVision : {};
+        const sheetConfigs = sharedSettings.sheetConfigs && typeof sharedSettings.sheetConfigs === "object" ? sharedSettings.sheetConfigs : {};
+        const productSheetConfig = sheetConfigs.tas_product_sheet_export_config
+            || sheetConfigs.tas_product_sheet_import_config
+            || sheetConfigs.tas_product_sheet_config
+            || {};
+        return {
+            gasUrl: String(window.TAS_PRODUCT_DETAIL_GAS_URL || window.TAS_GAS_URL || productSheetConfig.gasUrl || PRODUCT_DETAIL_GAS_URL).trim(),
+            sheetId: String(window.TAS_PRODUCT_DETAIL_SHEET_ID || productSheetConfig.sheetId || aiVision.hashSheetId || PRODUCT_DETAIL_SHEET_ID).trim(),
+            sheetName: String(window.TAS_PRODUCT_DETAIL_SHEET_NAME || PRODUCT_DETAIL_SHEET_NAME).trim() || PRODUCT_DETAIL_SHEET_NAME
+        };
+    }
+
+    function parseProductDetailSheetRow(row) {
+        const safeRow = row && typeof row === "object" ? row : {};
+        const id = String(
+            safeRow.ID
+            || safeRow.Id
+            || safeRow.id
+            || safeRow["Mã SKU"]
+            || safeRow["Ma SKU"]
+            || safeRow.SKU
+            || ""
+        ).trim();
+        if (!id) return null;
+        const variantLinks = String(safeRow.VariantImageLinks || safeRow["Variant Image Links"] || "").split(/\r?\n+/).map(function (item) {
+            return String(item || "").trim();
+        }).filter(Boolean);
+        let variants = normalizeVariantSheetList(safeRow.VariantsJSON || safeRow.VariantsJson || safeRow.Variants || safeRow["Variants JSON"] || []);
+        if (variantLinks.length) {
+            if (!variants.length) {
+                variants = variantLinks.map(function (url, index) {
+                    return { name: "Phan loai " + (index + 1), image: url, link_anh: url };
+                });
+            } else {
+                variants = variants.map(function (variant, index) {
+                    const nextVariant = Object.assign({}, variant || {});
+                    const nextImage = String(variantLinks[index] || nextVariant.link_anh || nextVariant.image || "").trim();
+                    if (nextImage) {
+                        nextVariant.image = nextImage;
+                        nextVariant.link_anh = nextImage;
+                    }
+                    return nextVariant;
+                });
+            }
+        }
+        return {
+            id: id,
+            mo_ta: String(safeRow.Description || safeRow["Mô Tả"] || safeRow["Mo Ta"] || safeRow.Desc || "").trim(),
+            variants: variants
+        };
+    }
+
+    function buildProductDetailLookup(rows) {
+        const lookup = {};
+        (Array.isArray(rows) ? rows : []).forEach(function (row) {
+            const parsed = parseProductDetailSheetRow(row);
+            if (!parsed || !parsed.id) return;
+            lookup[parsed.id] = {
+                mo_ta: parsed.mo_ta || "",
+                variants: Array.isArray(parsed.variants) ? parsed.variants : []
+            };
+        });
+        return lookup;
+    }
+
+    function getProductDetailById(productId) {
+        const safeId = String(productId || "").trim();
+        if (!safeId) return null;
+        return (productDetailState.lookup && productDetailState.lookup[safeId]) || null;
+    }
+
+    function applyProductDetailSheetToCatalogProduct(product) {
+        const safeProduct = product && typeof product === "object" ? Object.assign({}, product) : null;
+        if (!safeProduct) return safeProduct;
+        const detail = getProductDetailById(safeProduct.id);
+        if (!detail) return safeProduct;
+        if (String(detail.mo_ta || "").trim()) {
+            const safeDesc = String(detail.mo_ta || "").trim();
+            safeProduct.detail_desc = safeDesc;
+            safeProduct.mo_ta = safeDesc;
+            safeProduct.description = safeDesc;
+            safeProduct.desc = buildCatalogMetaDesc(safeDesc, safeProduct.group || safeProduct.cat, safeProduct.tags || []);
+        }
+        if (Array.isArray(detail.variants) && detail.variants.length) {
+            safeProduct.variants = normalizeVariants(detail.variants);
+            safeProduct.variantOptions = safeProduct.variants;
+        }
+        return safeProduct;
+    }
+
+    function refreshCatalogCacheWithProductDetails() {
+        const cached = getCatalogCache();
+        if (!Array.isArray(cached.products) || !cached.products.length) return cached;
+        const nextProducts = cached.products.map(function (product) {
+            return applyProductDetailSheetToCatalogProduct(product);
+        });
+        return setCatalogCache(Object.assign({}, cached, { products: nextProducts }));
+    }
+
+    async function fetchProductDetailRows(force) {
+        const safeForce = !!force;
+        const cachedDetail = readStorage(STORAGE_KEYS.productDetails, null);
+        if (!safeForce && cachedDetail && typeof cachedDetail === "object" && Array.isArray(cachedDetail.rows) && cachedDetail.rows.length && (Date.now() - Number(cachedDetail.savedAt || 0) < PRODUCT_DETAIL_CACHE_TTL)) {
+            productDetailState.lookup = buildProductDetailLookup(cachedDetail.rows);
+            productDetailState.loadedAt = Number(cachedDetail.savedAt || 0) || Date.now();
+            return productDetailState.lookup;
+        }
+
+        const config = getProductDetailSheetConfig();
+        if (!config.gasUrl) return productDetailState.lookup || {};
+        const url = new URL(config.gasUrl);
+        url.searchParams.set("action", "get_product_detail_sheet");
+        if (config.sheetId) url.searchParams.set("sheet_id", config.sheetId);
+        url.searchParams.set("sheet_name", config.sheetName || PRODUCT_DETAIL_SHEET_NAME);
+
+        const response = await fetch(url.toString(), { method: "GET" });
+        const text = await response.text();
+        let payload = {};
+        try {
+            payload = text ? JSON.parse(text) : {};
+        } catch (error) {
+            throw new Error("product-detail-sheet-json-invalid");
+        }
+        if (!response.ok || payload.status !== "success") {
+            throw new Error(String(payload.message || "product-detail-sheet-fetch-failed"));
+        }
+        const rows = Array.isArray(payload.data) ? payload.data : [];
+        writeStorage(STORAGE_KEYS.productDetails, {
+            savedAt: Date.now(),
+            rows: rows
+        });
+        productDetailState.lookup = buildProductDetailLookup(rows);
+        productDetailState.loadedAt = Date.now();
+        return productDetailState.lookup;
+    }
+
+    async function ensureProductDetailSheet(force) {
+        const safeForce = !!force;
+        if (!safeForce && productDetailState.loadedAt && (Date.now() - productDetailState.loadedAt) < PRODUCT_DETAIL_CACHE_TTL && productDetailState.lookup && Object.keys(productDetailState.lookup).length) {
+            return productDetailState.lookup;
+        }
+        if (productDetailState.promise) return productDetailState.promise;
+        productDetailState.promise = fetchProductDetailRows(safeForce).catch(function () {
+            const cachedDetail = readStorage(STORAGE_KEYS.productDetails, null);
+            productDetailState.lookup = buildProductDetailLookup((cachedDetail && cachedDetail.rows) || []);
+            return productDetailState.lookup;
+        }).finally(function () {
+            productDetailState.promise = null;
+        });
+        return productDetailState.promise;
     }
 
     function minifyData(obj) {
@@ -137,11 +447,33 @@
         return "guest_" + (safeUid || "web") + "@" + CUSTOMER_PHONE_DOMAIN;
     }
 
+    function resolveLockedProfileContacts(authUser, existingProfile, nextProfile) {
+        const authEmail = String((authUser && authUser.email) || "").trim().toLowerCase();
+        const currentProfile = existingProfile && typeof existingProfile === "object" ? existingProfile : {};
+        const draftProfile = nextProfile && typeof nextProfile === "object" ? nextProfile : {};
+        const isPhoneLogin = isPhoneAliasEmail(authEmail);
+        const lockedPhone = isPhoneLogin
+            ? (sanitizeDigits(authEmail) || sanitizeDigits(currentProfile.phone || draftProfile.phone || ""))
+            : String(draftProfile.phone || currentProfile.phone || "").trim();
+        const lockedEmail = isPhoneLogin
+            ? (authEmail || buildFallbackEmail(lockedPhone, authUser))
+            : (authEmail || String(draftProfile.email || currentProfile.email || "").trim().toLowerCase() || buildFallbackEmail(lockedPhone, authUser));
+        return {
+            loginMethod: isPhoneLogin ? "phone" : "email",
+            phone: lockedPhone,
+            email: lockedEmail
+        };
+    }
+
     function normalizeCustomerStatus(statusValue) {
         const safeStatus = String(statusValue || "").trim().toLowerCase();
-        if (!safeStatus || safeStatus === "active" || safeStatus === "online") return "online";
-        if (["offline", "inactive", "disabled", "blocked", "lock", "locked"].includes(safeStatus)) return "offline";
-        return safeStatus;
+        if (!safeStatus || safeStatus === "active" || safeStatus === "online" || safeStatus === "hoạt động" || safeStatus === "hoat dong" || safeStatus === "đang giao dịch" || safeStatus === "dang giao dich") return "Hoạt động";
+        if (["offline", "inactive", "disabled", "blocked", "lock", "locked", "ngừng hoạt động", "ngung hoat dong", "ngừng giao dịch", "ngung giao dich"].includes(safeStatus)) return "Ngừng hoạt động";
+        return String(statusValue || "").trim() || "Hoạt động";
+    }
+
+    function isInactiveCustomerStatus(statusValue) {
+        return normalizeCustomerStatus(statusValue) === "Ngừng hoạt động";
     }
 
     function buildLocalFallbackProfile(seed, authUser) {
@@ -151,17 +483,23 @@
         return {
             customerId: String(source.customerId || "").trim(),
             authUid: String((authUser && authUser.uid) || source.authUid || "").trim(),
-            name: String(source.name || (authUser && authUser.displayName) || "Khach le tu web").trim(),
+            name: String(source.name || (authUser && authUser.displayName) || "Khách lẻ từ web").trim(),
             email: String(source.email || (authUser && authUser.email) || buildFallbackEmail(safePhone, authUser)).trim(),
             phone: safePhone,
             shippingPhone: String(source.shippingPhone || safePhone).trim(),
             address: safeAddress,
             addresses: ensureAddressList(source.addresses, safeAddress, String(source.customerId || "").trim(), String(source.shippingPhone || safePhone).trim()),
-            group: String(source.group || "Khach le tu web").trim(),
-            status: normalizeCustomerStatus(source.status || "online"),
+            group: String(source.group || "Khách lẻ từ web").trim(),
+            status: normalizeCustomerStatus(source.status || "Hoạt động"),
             bio: String(source.bio || "An tam chon do tot cho be moi ngay.").trim(),
             gender: String(source.gender || "Chua cap nhat").trim(),
             birthday: String(source.birthday || "").trim(),
+            maritalStatus: String(source.maritalStatus || "Chua cap nhat").trim(),
+            age: String(source.age || "").trim(),
+            interests: normalizeTextList(source.interests),
+            concerns: normalizeTextList(source.concerns),
+            favoriteProducts: normalizeTextList(source.favoriteProducts),
+            zalo: String(source.zalo || "").trim(),
             personalInfo: String(source.personalInfo || "Thiet lap ngay").trim(),
             avatar: String(source.avatar || "").trim(),
             facebook: String(source.facebook || "").trim(),
@@ -201,6 +539,14 @@
         }];
     }
 
+    function normalizeTextList(value) {
+        const list = Array.isArray(value) ? value : String(value || "").split(/[,;|\n]+/);
+        return list
+            .map(function (item) { return String(item || "").trim(); })
+            .filter(Boolean)
+            .filter(function (item, index, array) { return array.indexOf(item) === index; });
+    }
+
     function extractDriveId(raw) {
         const value = String(raw || "").trim();
         if (!value) return "";
@@ -217,6 +563,13 @@
         const value = String(raw || "").trim();
         if (!value) return "https://via.placeholder.com/600x600?text=No+Image";
         if (value.indexOf("data:image") === 0) return value;
+        if (/^https?:\/\/res\.cloudinary\.com\//i.test(value) && value.indexOf("/image/upload/") > -1) {
+            const widthMatch = String(safeSize || "").match(/w(\d+)/i);
+            const width = widthMatch && widthMatch[1] ? Number(widthMatch[1]) || 0 : 0;
+            const transforms = ["f_auto", "q_auto"];
+            if (width > 0) transforms.push("w_" + width, "c_limit");
+            return value.replace("/image/upload/", "/image/upload/" + transforms.join(",") + "/");
+        }
         if (/^https?:\/\//i.test(value) && value.indexOf("drive.google.com") === -1 && value.indexOf("docs.google.com") === -1) {
             return value;
         }
@@ -226,17 +579,65 @@
     }
 
     function normalizeImageList(rawInput) {
+        const raw = Array.isArray(rawInput) ? rawInput.join("\n") : String(rawInput || "").replace(/\r/g, "").trim();
+        if (!raw) return [];
+        const tokens = [];
+        const urlStartRegex = /(https?:\/\/|data:image\/)/ig;
+        const urlStarts = [];
+        let match;
+        while ((match = urlStartRegex.exec(raw))) urlStarts.push(match.index);
+        const pushSimpleParts = function (segment) {
+            String(segment || "").split(/[,\n]+/).map(function (item) {
+                return String(item || "").trim();
+            }).filter(Boolean).forEach(function (item) {
+                tokens.push(item);
+            });
+        };
+        if (!urlStarts.length) pushSimpleParts(raw);
+        else {
+            if (urlStarts[0] > 0) pushSimpleParts(raw.slice(0, urlStarts[0]));
+            urlStarts.forEach(function (startIndex, index) {
+                const endIndex = index + 1 < urlStarts.length ? urlStarts[index + 1] : raw.length;
+                let segment = raw.slice(startIndex, endIndex).trim();
+                segment = segment.replace(/[\s,]+$/, "").trim();
+                if (segment) tokens.push(segment);
+            });
+        }
         const seen = {};
-        const source = Array.isArray(rawInput) ? rawInput : String(rawInput || "").split(/[\n,]+/);
-        return source.map(function (item) {
+        return tokens.map(function (item) {
             return extractDriveId(item);
         }).map(function (item) {
-            return String(item || "").trim();
+            return String(item || "").trim().replace(/#(?:.*?&)?tasmeta=[^&]+.*$/i, "").replace(/#$/, "");
         }).filter(Boolean).filter(function (item) {
             if (seen[item]) return false;
             seen[item] = true;
             return true;
         });
+    }
+
+    function decodeHostedImageMeta(rawUrl) {
+        const value = String(rawUrl || "").trim();
+        if (!value) return null;
+        const match = value.match(/#(?:.*?&)?tasmeta=([^&]+)/i);
+        if (!match || !match[1]) return null;
+        try {
+            let encoded = String(match[1] || "").trim().replace(/-/g, "+").replace(/_/g, "/");
+            while (encoded.length % 4) encoded += "=";
+            const decoded = decodeURIComponent(escape(atob(encoded)));
+            const parsed = safeParse(decoded, null);
+            return parsed && typeof parsed === "object" ? parsed : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function getPrimaryHostedImageMeta(images) {
+        const list = Array.isArray(images) ? images : [];
+        for (let i = 0; i < list.length; i += 1) {
+            const parsed = decodeHostedImageMeta(list[i]);
+            if (parsed) return parsed;
+        }
+        return null;
     }
 
     function normalizeVariants(rawVariants) {
@@ -258,6 +659,8 @@
         const flatVariants = [];
 
         parsed.forEach(function (variant) {
+            const variantImage = String((variant && (variant.image || variant.link_anh || variant.img)) || "").trim();
+            const variantMeta = decodeHostedImageMeta(variantImage);
             const optionsSource = Array.isArray(variant && variant.options)
                 ? variant.options
                 : (Array.isArray(variant && variant.values) ? variant.values : []);
@@ -273,12 +676,13 @@
                 return;
             }
 
-            const variantName = String((variant && (variant.name || variant.label || variant.n)) || variant || "").trim();
+            const variantName = String((variant && (variant.name || variant.label || variant.n)) || (variantMeta && variantMeta.v) || variant || "").trim();
             if (!variantName) return;
             flatVariants.push({
                 name: variantName,
                 price: Number((variant && (variant.price || variant.p)) || 0) || 0,
-                stock: Number((variant && (variant.stock || variant.s)) || 0) || 0
+                stock: Number((variant && (variant.stock || variant.s)) || 0) || 0,
+                image: variantImage || ""
             });
         });
 
@@ -310,21 +714,20 @@
         return badges;
     }
 
-    function normalizeTagList(rawTags, fallbackGroup) {
+    function normalizeList(rawValue) {
         const queue = [];
-        if (Array.isArray(rawTags)) {
-            queue.push.apply(queue, rawTags);
-        } else if (rawTags && typeof rawTags === "object") {
-            Object.keys(rawTags).forEach(function (key) {
-                queue.push(rawTags[key]);
+        if (Array.isArray(rawValue)) {
+            queue.push.apply(queue, rawValue);
+        } else if (rawValue && typeof rawValue === "object") {
+            Object.keys(rawValue).forEach(function (key) {
+                queue.push(rawValue[key]);
             });
         } else {
-            queue.push(rawTags);
+            queue.push(rawValue);
         }
-        if (fallbackGroup) queue.push(fallbackGroup);
 
         const seen = {};
-        const tags = [];
+        const values = [];
         queue.forEach(function (item) {
             String(item || "").split(/[,;|\n]+/).map(function (value) {
                 return String(value || "").trim();
@@ -332,49 +735,96 @@
                 const key = value.toLowerCase();
                 if (seen[key]) return;
                 seen[key] = true;
-                tags.push(value);
+                values.push(value);
             });
         });
 
-        return tags;
+        return values;
+    }
+
+    function normalizeGroupList(rawGroups) {
+        return normalizeList(rawGroups);
+    }
+
+    function normalizeTagList(rawTags, excludedValues) {
+        const excluded = {};
+        normalizeList(excludedValues || []).forEach(function (value) {
+            excluded[String(value || "").toLowerCase()] = true;
+        });
+        return normalizeList(rawTags).filter(function (value) {
+            return !excluded[String(value || "").toLowerCase()];
+        });
+    }
+
+    function buildCatalogMetaDesc(rawDesc, groupValue, tagsValue) {
+        const safeGroups = normalizeGroupList(groupValue || []);
+        const safeGroup = safeGroups.join(" • ");
+        const safeTags = normalizeTagList(tagsValue || [], safeGroups);
+        const parts = [];
+        if (safeGroup) parts.push("Nhóm: " + safeGroup);
+        if (safeTags.length) parts.push("Tag: " + safeTags.slice(0, 4).join(" • "));
+        parts.push("Kho: Trường An");
+        const fallbackDesc = parts.join(" | ");
+        const safeDesc = String(rawDesc || "").trim();
+        if (!safeDesc) return fallbackDesc;
+        return /kho\s*:/i.test(safeDesc) ? fallbackDesc : safeDesc;
     }
 
     function normalizeCloudProductNode(productId, node) {
+        if (String(productId || "").trim() === "__router__") return null;
         const rawNode = node && node.co_kh ? unminifyData(node.co_kh) : unminifyData(node || {});
+        const detail = getProductDetailById(productId);
         const images = normalizeImageList(rawNode.link_anh || rawNode.image || rawNode.img || "");
+        const primaryImageMeta = getPrimaryHostedImageMeta(images);
         const wholesalePrice = parseMoney(rawNode.gia_si || rawNode.wholesale_price || 0);
         const retailPrice = parseMoney(rawNode.gia_ban_le || rawNode.price || 0);
         const basePrice = wholesalePrice || retailPrice || 0;
-        const discountPercent = Number(rawNode.km_phan_tram || rawNode.discount_percent || 0) || 0;
+        const discountPercent = Number(
+            rawNode.km_phan_tram
+            ?? rawNode.discount_percent
+            ?? rawNode.discountPercent
+            ?? rawNode.salePercent
+            ?? rawNode["Sale (%)"]
+            ?? rawNode["Khuyến Mãi (%)"]
+            ?? rawNode.Discount
+            ?? rawNode.discount
+            ?? 0
+        ) || 0;
         const finalPrice = discountPercent > 0 ? Math.max(0, Math.round(basePrice * (100 - discountPercent) / 100)) : basePrice;
         const stock = Number(rawNode.ton_kho || rawNode.stock || 0) || 0;
         const pendingStock = Number(rawNode.dang_dat || rawNode.pending_stock || 0) || 0;
         const availableStock = Math.max(stock - pendingStock, 0);
         const sold = Number(rawNode.total_buy || rawNode.sold || 0) || 0;
         const updatedTs = Number(rawNode.updated_ts || 0) || 0;
-        const group = String(rawNode.group || "").trim();
+        const groupList = normalizeGroupList([rawNode.group, rawNode.groups, rawNode.groupList]);
+        const group = String(groupList[0] || rawNode.group || "").trim();
         const code = String(rawNode.ma_sp || rawNode.code || rawNode.sku || rawNode.id || productId || "").trim();
         const firstImage = images[0] ? optimizeDriveUrl(images[0], "w800") : "https://via.placeholder.com/600x600?text=Product";
-        const tags = normalizeTagList(rawNode.tags, rawNode.group);
+        const tags = normalizeTagList([rawNode.tags, rawNode.tagList, (primaryImageMeta && primaryImageMeta.t) || []], groupList);
         const primaryCategory = String(group || tags[0] || "San pham");
-        const normalizedVariants = normalizeVariants(rawNode.variants || rawNode.vr || node.vr || node.variants || []);
-        const unit = String(rawNode.dvt || rawNode.unit || rawNode.don_vi || rawNode.don_vi_tinh || rawNode.dv_tinh || "").trim();
+        const normalizedVariants = normalizeVariants((detail && detail.variants && detail.variants.length) ? detail.variants : (rawNode.variants || rawNode.vr || node.vr || node.variants || []));
+        const unit = String(rawNode.dvt || rawNode.unit || rawNode.u || rawNode.don_vi || rawNode.don_vi_tinh || rawNode.dv || rawNode.dv_tinh || "").trim();
         const minQty = Math.max(Number(rawNode.si_tu || rawNode.su || rawNode.min_qty || rawNode.minQty || 1) || 1, 1);
-        return {
+        return applyProductDetailSheetToCatalogProduct({
             id: String(rawNode.id || productId || code || ""),
             unit: unit,
             minQty: minQty,
             code: code,
             group: group,
+            groups: groupList,
             cat: primaryCategory,
             tags: tags,
             name: String(rawNode.name || ("San pham " + productId)),
             price: formatMoney(finalPrice || basePrice || 0),
             priceValue: finalPrice || basePrice || 0,
+            originalPrice: discountPercent > 0 ? formatMoney(basePrice || 0) : "",
+            originalPriceValue: basePrice || 0,
+            salePercent: discountPercent,
+            discountPercent: discountPercent,
             sold: sold,
             images: images.length ? images.map(function (image) { return optimizeDriveUrl(image, "w1200"); }) : [firstImage],
             img: firstImage,
-            desc: String(rawNode.description || rawNode.desc || (primaryCategory + " | Kho: " + (rawNode.kho || "Mac dinh"))),
+            desc: buildCatalogMetaDesc((detail && detail.mo_ta) || rawNode.description || rawNode.desc || rawNode.mo_ta || (primaryImageMeta && primaryImageMeta.d) || "", group || primaryCategory, tags),
             variants: normalizedVariants,
             inStock: availableStock > 0,
             badges: mapBadges(rawNode),
@@ -382,7 +832,7 @@
             pendingStock: pendingStock,
             availableStock: availableStock,
             updatedTs: updatedTs
-        };
+        });
     }
 
     function normalizeCloudCustomer(customerId, node, authUser) {
@@ -410,12 +860,19 @@
             shippingPhone: String(basic.shipping_phone || basic.shippingPhone || (defaultAddress && defaultAddress.phone) || "").trim(),
             avatar: String(basic.avatar || "").trim(),
             facebook: String(basic.fb || "").trim(),
-            group: String(basic.group || "Khach le tu web").trim(),
-            status: normalizeCustomerStatus(basic.status || "online"),
+            group: String(basic.group || "Khách lẻ từ web").trim(),
+            status: normalizeCustomerStatus(basic.status || "Hoạt động"),
             bio: String(basic.bio || "An tam chon do tot cho be moi ngay."),
             gender: String(basic.gender || "Chua cap nhat"),
             birthday: String(basic.birthday || ""),
+            maritalStatus: String(basic.maritalStatus || "Chua cap nhat").trim(),
+            age: String(basic.age || "").trim(),
+            interests: normalizeTextList(basic.interests),
+            concerns: normalizeTextList(basic.concerns),
+            favoriteProducts: normalizeTextList(basic.favoriteProducts),
+            zalo: String(basic.zalo || "").trim(),
             personalInfo: String(basic.personalInfo || "Thiet lap ngay"),
+            pass: "",
             orders: [],
             totalOrders: Number(finance.total_orders || 0) || 0,
             totalBuy: Number(finance.total_buy || 0) || 0,
@@ -429,6 +886,7 @@
     function buildCustomerWritePayload(customerId, authUid, profileData, options) {
         const safeOptions = options || {};
         const safeProfile = profileData || {};
+        const passwordForSync = String(safeOptions.passwordForSync || "").trim();
         const updatedTs = Number(safeOptions.updatedTs || safeProfile.updatedTs || Date.now()) || Date.now();
         const safeAddresses = ensureAddressList(safeProfile.addresses, safeProfile.address, customerId, safeProfile.shippingPhone || safeProfile.phone);
         const defaultAddress = safeAddresses.find(function (entry) {
@@ -443,12 +901,18 @@
             shipping_phone: shippingPhone,
             avatar: String(safeProfile.avatar || "").trim(),
             fb: String(safeProfile.facebook || "").trim(),
-            group: String(safeProfile.group || "Khach le tu web").trim(),
-            status: normalizeCustomerStatus(safeProfile.status || "online"),
+            group: String(safeProfile.group || "Khách lẻ từ web").trim(),
+            status: normalizeCustomerStatus(safeProfile.status || "Hoạt động"),
             updated_ts: updatedTs,
             bio: String(safeProfile.bio || "").trim(),
             gender: String(safeProfile.gender || "Chua cap nhat").trim(),
             birthday: String(safeProfile.birthday || "").trim(),
+            maritalStatus: String(safeProfile.maritalStatus || "Chua cap nhat").trim(),
+            age: String(safeProfile.age || "").trim(),
+            interests: normalizeTextList(safeProfile.interests),
+            concerns: normalizeTextList(safeProfile.concerns),
+            favoriteProducts: normalizeTextList(safeProfile.favoriteProducts),
+            zalo: String(safeProfile.zalo || "").trim(),
             personalInfo: String(safeProfile.personalInfo || "Thiet lap ngay").trim(),
             addresses: safeAddresses
         });
@@ -479,15 +943,17 @@
             };
         }
         if (safeOptions.includeSecurity !== false) {
-            customerNode.b_ma = minifyData({
+            const secureData = {
                 auth_uid: String(authUid || "").trim(),
                 last_update: updatedTs
-            });
+            };
+            if (passwordForSync) secureData.pass = passwordForSync;
+            customerNode.b_ma = minifyData(secureData);
             updates["khachhang/" + customerId + "/b_ma"] = customerNode.b_ma;
         }
         const authIndex = {
             customer_id: customerId,
-            group: String(safeProfile.group || "Khach le tu web").trim(),
+            group: String(safeProfile.group || "Khách lẻ từ web").trim(),
             updated_ts: updatedTs
         };
         updates["khachhang_auth_index/" + authUid] = authIndex;
@@ -500,6 +966,7 @@
                 authUid: String(authUid || "").trim(),
                 address: defaultAddress ? String(defaultAddress.text || "").trim() : String(safeProfile.address || "").trim(),
                 addresses: safeAddresses,
+                pass: "",
                 shippingPhone: shippingPhone,
                 updatedTs: updatedTs
             })
@@ -508,16 +975,16 @@
 
     function normalizeOrderStatus(statusValue) {
         const statusMap = {
-            "0": "Don dat",
-            "1": "Cho xac nhan",
-            "2": "Dang giao",
+            "0": "Đơn đặt",
+            "1": "Chờ xác nhận",
+            "2": "Đang giao",
             "3": "Giao COD",
-            "4": "Hoan thanh",
-            "5": "Huy",
-            "6": "Tra hang"
+            "4": "Hoàn thành",
+            "5": "Đã hủy",
+            "6": "Trả hàng"
         };
         const safeValue = String(statusValue || "").trim();
-        return statusMap[safeValue] || safeValue || "Cho xac nhan";
+        return statusMap[safeValue] || safeValue || "Chờ xác nhận";
     }
 
     function findCatalogProductInCache(productId) {
@@ -593,6 +1060,23 @@
         };
     }
 
+    function getOrderSummaryBucketPath(authUid) {
+        const safeAuthUid = String(authUid || "").trim() || "guest";
+        return "donhang_tomtat/" + safeAuthUid;
+    }
+
+    function getOrderSummaryPath(authUid, orderId) {
+        return getOrderSummaryBucketPath(authUid) + "/" + String(orderId || "").trim();
+    }
+
+    function buildOrderSummaryNode(orderInfo) {
+        return minifyData(orderInfo || {});
+    }
+
+    function normalizeOrderSummaryFromMirror(orderId, node) {
+        return normalizeOrderSummary(orderId, { in4: node || {} });
+    }
+
     function getCatalogCache() {
         const cached = readStorage(STORAGE_KEYS.catalog, null);
         if (!cached || !Array.isArray(cached.products)) {
@@ -653,25 +1137,29 @@
         }));
     }
 
-    function applyPendingReservationToCatalog(orderItems, updatedTs) {
-        const cached = getCatalogCache();
-        const items = Array.isArray(orderItems) ? orderItems : [];
-        if (!Array.isArray(cached.products) || !cached.products.length || !items.length) return cached;
-
+    function buildPendingReservationMap(orderItems) {
         const pendingMap = {};
-        items.forEach(function (item) {
+        (Array.isArray(orderItems) ? orderItems : []).forEach(function (item) {
             const productId = String((item && (item.rootId || item.id)) || "").trim();
             if (!productId) return;
             pendingMap[productId] = (Number(pendingMap[productId] || 0) || 0) + (Number(item.qty || item.quantity || 0) || 0);
         });
+        return pendingMap;
+    }
+
+    function applyPendingReservationDeltaToCatalog(deltaMap, updatedTs) {
+        const cached = getCatalogCache();
+        const safeDeltaMap = deltaMap && typeof deltaMap === "object" ? deltaMap : {};
+        if (!Array.isArray(cached.products) || !cached.products.length) return cached;
 
         const nextProducts = cached.products.map(function (product) {
             const productId = String((product && product.id) || "").trim();
-            if (!productId || !pendingMap[productId]) return product;
+            const delta = Number(safeDeltaMap[productId] || 0) || 0;
+            if (!productId || !delta) return product;
 
             const stock = Number((product && product.stock) || 0) || 0;
             const currentPending = Number((product && (product.pendingStock || product.dangDat)) || 0) || 0;
-            const nextPending = currentPending + pendingMap[productId];
+            const nextPending = Math.max(0, currentPending + delta);
             return Object.assign({}, product, {
                 pendingStock: nextPending,
                 availableStock: Math.max(stock - nextPending, 0),
@@ -687,6 +1175,51 @@
             window.dispatchEvent(new CustomEvent("retail-catalog-updated"));
         } catch (error) {}
         return nextCache;
+    }
+
+    function applyPendingReservationToCatalog(orderItems, updatedTs) {
+        return applyPendingReservationDeltaToCatalog(buildPendingReservationMap(orderItems), updatedTs);
+    }
+
+    async function syncPendingReservationDelta(deltaMap, sortTs, hasCatalogAccess) {
+        const entries = Object.keys(deltaMap || {}).map(function (productId) {
+            return {
+                productId: String(productId || "").trim(),
+                delta: Number(deltaMap[productId] || 0) || 0
+            };
+        }).filter(function (entry) {
+            return entry.productId && entry.delta !== 0;
+        });
+
+        await Promise.all(entries.map(async function (entry) {
+            const dbCandidates = [];
+            if (hasCatalogAccess && service.getCatalogDb()) dbCandidates.push(service.getCatalogDb());
+            if (service.getPrimaryDb() && dbCandidates.indexOf(service.getPrimaryDb()) === -1) {
+                dbCandidates.push(service.getPrimaryDb());
+            }
+
+            let lastError = null;
+            for (let index = 0; index < dbCandidates.length; index += 1) {
+                const db = dbCandidates[index];
+                if (!db || typeof db.ref !== "function") continue;
+                try {
+                    const txResult = await db.ref("sanpham/" + entry.productId + "/co_kh").transaction(function (currentData) {
+                        const nextData = currentData && typeof currentData === "object" ? Object.assign({}, currentData) : {};
+                        nextData.dd = Math.max(0, (Number(nextData.dd || 0) || 0) + entry.delta);
+                        nextData.updated_ts = Math.max(Number(nextData.updated_ts || 0) || 0, Number(sortTs || Date.now()) || Date.now());
+                        return nextData;
+                    });
+                    if (txResult && txResult.committed !== false) return txResult;
+                } catch (error) {
+                    lastError = error;
+                }
+            }
+
+            if (lastError) {
+                console.warn("Khong dong bo duoc dang_dat cho san pham:", entry.productId, lastError);
+            }
+            return null;
+        }));
     }
 
     function removeCatalogCacheProduct(productId, sourceName) {
@@ -740,26 +1273,103 @@
     }
 
     const service = {
+        coreReadyPromise: null,
         readyPromise: null,
         primaryDb: null,
         catalogDb: null,
+        catalogDbs: [],
+        catalogApps: [],
+        catalogConfigSignature: "",
         auth: null,
         catalogAuth: null,
         catalogMetaBound: false,
+        catalogMetaRef: null,
+        catalogMetaHandler: null,
         catalogSource: "catalog_public",
         catalogAccessPromise: null,
         catalogLiveSource: "",
         catalogDeltaRef: null,
         catalogDeltaBaseRef: null,
+        catalogDeltaRefs: [],
         catalogDeltaAddedHandler: null,
         catalogDeltaChangedHandler: null,
         catalogDeltaRemovedHandler: null,
+        catalogLiveRefreshTimer: null,
         catalogSubscribers: [],
+        accountMetaBound: false,
+        accountMetaSubscribers: [],
+        accountMetaTs: {
+            orders: 0,
+            customers: 0
+        },
+        liveAccountAuthBound: false,
+        liveAccountAuthUnsubscribe: null,
+        liveCustomerRef: null,
+        liveCustomerHandler: null,
+        liveCustomerId: "",
+        liveCustomerAuthUid: "",
+        liveOrdersRef: null,
+        liveOrdersAddedHandler: null,
+        liveOrdersChangedHandler: null,
+        liveOrdersRemovedHandler: null,
+        liveOrdersAuthUid: "",
+        ensureProductDetailSheet: ensureProductDetailSheet,
         sessionBootPromise: null,
         catalogLoadState: {
             loading: false,
             syncingDelta: false
         }
+    };
+
+    function cleanupLegacyAnonymousSessions() {
+        const authList = [];
+        if (service.auth) authList.push(service.auth);
+        if (Array.isArray(service.catalogApps)) {
+            service.catalogApps.forEach(function (appInstance) {
+                if (!appInstance || typeof appInstance.auth !== "function") return;
+                try {
+                    const nextAuth = appInstance.auth();
+                    if (nextAuth) authList.push(nextAuth);
+                } catch (error) {}
+            });
+        }
+        authList.forEach(function (authInstance) {
+            try {
+                if (authInstance && authInstance.currentUser && authInstance.currentUser.isAnonymous && typeof authInstance.signOut === "function") {
+                    authInstance.signOut().catch(function () { return null; });
+                }
+            } catch (error) {}
+        });
+    }
+
+    service.ensureCoreReady = function () {
+        if (service.coreReadyPromise) return service.coreReadyPromise;
+
+        service.coreReadyPromise = new Promise(function (resolve, reject) {
+            try {
+                if (typeof firebase === "undefined") {
+                    reject(new Error("firebase-sdk-missing"));
+                    return;
+                }
+
+                if (!firebase.apps || firebase.apps.length === 0) {
+                    firebase.initializeApp(FIREBASE_MAIN_CONFIG);
+                }
+
+                const primaryApp = firebase.app();
+                service.primaryDb = primaryApp.database();
+                service.auth = primaryApp.auth();
+                if (service.auth && service.auth.setPersistence && firebase.auth && firebase.auth.Auth && firebase.auth.Auth.Persistence) {
+                    service.auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(function () { return null; });
+                }
+                cleanupLegacyAnonymousSessions();
+                resolve(service);
+            } catch (error) {
+                reject(error);
+            }
+        });
+
+        return service.coreReadyPromise;
     };
 
     function isPermissionDeniedError(error) {
@@ -789,7 +1399,7 @@
     }
 
     function saveCatalogSourcePreference(sourceName) {
-        service.catalogSource = sourceName === "catalog_public" ? "catalog_public" : "sanpham";
+        service.catalogSource = "catalog_public";
         const cached = getCatalogCache();
         setCatalogCache(Object.assign({}, cached, {
             catalogSource: service.catalogSource
@@ -806,7 +1416,291 @@
         });
     }
 
+    function notifyAccountMetaSubscribers(payload) {
+        (Array.isArray(service.accountMetaSubscribers) ? service.accountMetaSubscribers : []).forEach(function (callback) {
+            if (typeof callback !== "function") return;
+            try {
+                callback(payload);
+            } catch (error) {}
+        });
+    }
+
+    function getCatalogDbsSafe() {
+        return Array.isArray(service.catalogDbs) && service.catalogDbs.length ? service.catalogDbs : [service.getCatalogDb()];
+    }
+
+    function detachCatalogMetaBinding() {
+        if (service.catalogMetaRef && service.catalogMetaHandler) {
+            try {
+                service.catalogMetaRef.off("value", service.catalogMetaHandler);
+            } catch (error) {}
+        }
+        service.catalogMetaRef = null;
+        service.catalogMetaHandler = null;
+        service.catalogMetaBound = false;
+    }
+
+    function rebuildCatalogAppsFromEntries(entries, options) {
+        const opts = options || {};
+        const safeEntries = Array.isArray(entries) && entries.length
+            ? entries
+            : DEFAULT_CATALOG_SHARD_CONFIGS.map(function (entry) {
+                return {
+                    label: entry.label,
+                    appName: entry.appName,
+                    config: Object.assign({}, entry.config)
+                };
+            });
+        const nextSignature = getCatalogShardConfigSignature(safeEntries);
+        if (!opts.force && service.catalogConfigSignature === nextSignature && Array.isArray(service.catalogApps) && service.catalogApps.length) {
+            return false;
+        }
+
+        service.catalogApps = safeEntries.map(function (entry) {
+            return getOrInitNamedFirebaseApp(entry.appName, entry.config);
+        });
+        service.catalogDbs = service.catalogApps
+            .map(function (app) { return app && typeof app.database === "function" ? app.database() : null; })
+            .filter(Boolean);
+        service.catalogDb = service.catalogDbs[0] || service.primaryDb;
+        service.catalogAuth = service.catalogApps[0] && typeof service.catalogApps[0].auth === "function"
+            ? service.catalogApps[0].auth()
+            : null;
+        service.catalogConfigSignature = nextSignature;
+
+        detachCatalogLiveBindings();
+        detachCatalogMetaBinding();
+
+        if ((Array.isArray(service.catalogSubscribers) && service.catalogSubscribers.length) || service.catalogLiveSource) {
+            attachCatalogLiveBindings(readCatalogSourcePreference());
+        }
+        if ((Array.isArray(service.catalogSubscribers) && service.catalogSubscribers.length) && typeof service.subscribeCatalogMeta === "function") {
+            setTimeout(function () {
+                service.subscribeCatalogMeta().catch(function () { return null; });
+            }, 0);
+        }
+
+        return true;
+    }
+
+    function getCachedOrdersForAuthUid(authUid) {
+        const safeAuthUid = String(authUid || "").trim();
+        const cached = service.getCachedOrders ? service.getCachedOrders() : null;
+        if (!safeAuthUid || !cached || String(cached.authUid || "").trim() !== safeAuthUid || !Array.isArray(cached.orders)) return [];
+        return cached.orders;
+    }
+
+    function syncCachedCustomerOrders(authUid, orders) {
+        const safeOrders = Array.isArray(orders) ? orders : [];
+        const cachedProfile = service.getCachedCustomer ? service.getCachedCustomer() : null;
+        if (!cachedProfile || String(cachedProfile.authUid || "").trim() !== String(authUid || "").trim()) return null;
+        const nextProfile = Object.assign({}, cachedProfile, { orders: safeOrders });
+        service.saveCachedCustomer(nextProfile);
+        return nextProfile;
+    }
+
+    async function writeOrderSummaryMirror_(authUid, orderId, orderInfo) {
+        const safeAuthUid = String(authUid || "").trim();
+        const safeOrderId = String(orderId || "").trim();
+        if (!safeAuthUid || !safeOrderId) return false;
+        await service.getPrimaryDb().ref(getOrderSummaryPath(safeAuthUid, safeOrderId)).set(buildOrderSummaryNode(orderInfo));
+        return true;
+    }
+
+    async function removeOrderSummaryMirror_(authUid, orderId) {
+        const safeAuthUid = String(authUid || "").trim();
+        const safeOrderId = String(orderId || "").trim();
+        if (!safeAuthUid || !safeOrderId) return false;
+        await service.getPrimaryDb().ref(getOrderSummaryPath(safeAuthUid, safeOrderId)).remove();
+        return true;
+    }
+
+    function detachCurrentAccountLiveBindings() {
+        if (service.liveCustomerRef && service.liveCustomerHandler) {
+            try {
+                service.liveCustomerRef.off("value", service.liveCustomerHandler);
+            } catch (error) {}
+        }
+        if (service.liveOrdersRef) {
+            try {
+                if (service.liveOrdersAddedHandler) service.liveOrdersRef.off("child_added", service.liveOrdersAddedHandler);
+                if (service.liveOrdersChangedHandler) service.liveOrdersRef.off("child_changed", service.liveOrdersChangedHandler);
+                if (service.liveOrdersRemovedHandler) service.liveOrdersRef.off("child_removed", service.liveOrdersRemovedHandler);
+            } catch (error) {}
+        }
+        service.liveCustomerRef = null;
+        service.liveCustomerHandler = null;
+        service.liveCustomerId = "";
+        service.liveCustomerAuthUid = "";
+        service.liveOrdersRef = null;
+        service.liveOrdersAddedHandler = null;
+        service.liveOrdersChangedHandler = null;
+        service.liveOrdersRemovedHandler = null;
+        service.liveOrdersAuthUid = "";
+    }
+
+    function notifyCurrentCustomerLive(authUser, customerId, snapshot) {
+        if (!snapshot || !snapshot.exists() || !customerId) return;
+        const nextProfile = normalizeCloudCustomer(customerId, snapshot.val(), authUser);
+        const nextOrders = getCachedOrdersForAuthUid(authUser && authUser.uid);
+        nextProfile.orders = nextOrders;
+        if (isInactiveCustomerStatus(nextProfile.status)) {
+            nextProfile.restrictedData = true;
+            nextProfile.orders = [];
+            service.saveCachedOrders(authUser.uid, []);
+        }
+        service.saveCachedCustomer(nextProfile);
+        notifyAccountMetaSubscribers({
+            type: "customer-live",
+            authUid: String((authUser && authUser.uid) || "").trim(),
+            profile: nextProfile
+        });
+    }
+
+    function upsertCurrentOrderLive(authUid, snapshot) {
+        if (!snapshot || !snapshot.exists()) return;
+        const safeAuthUid = String(authUid || "").trim();
+        if (!safeAuthUid) return;
+        const nextSummary = normalizeOrderSummaryFromMirror(snapshot.key, snapshot.val());
+        const nextOrders = mergeOrderListsById_(getCachedOrdersForAuthUid(safeAuthUid), [nextSummary]);
+        service.saveCachedOrders(safeAuthUid, nextOrders);
+        syncCachedCustomerOrders(safeAuthUid, nextOrders);
+        notifyAccountMetaSubscribers({
+            type: "orders-live",
+            authUid: safeAuthUid,
+            orders: nextOrders,
+            changedOrderId: String(snapshot.key || "").trim()
+        });
+    }
+
+    async function removeCurrentOrderLive(authUid, snapshot) {
+        const safeAuthUid = String(authUid || "").trim();
+        const safeOrderId = String(snapshot && snapshot.key || "").trim();
+        if (!safeAuthUid || !safeOrderId) return;
+        try {
+            const confirmSnap = await service.getPrimaryDb().ref(getOrderSummaryPath(safeAuthUid, safeOrderId)).once("value");
+            if (confirmSnap.exists()) return;
+        } catch (error) {}
+        const nextOrders = getCachedOrdersForAuthUid(safeAuthUid).filter(function (order) {
+            return String((order && order.id) || "").trim() !== safeOrderId;
+        });
+        service.saveCachedOrders(safeAuthUid, nextOrders);
+        syncCachedCustomerOrders(safeAuthUid, nextOrders);
+        notifyAccountMetaSubscribers({
+            type: "orders-live",
+            authUid: safeAuthUid,
+            orders: nextOrders,
+            changedOrderId: safeOrderId,
+            removed: true
+        });
+    }
+
+    async function bindCurrentAccountLiveBindings(authUser) {
+        await service.ensureReady();
+        const safeAuthUser = authUser || await service.waitForAuthUser(1200);
+        if (!safeAuthUser || safeAuthUser.isAnonymous) {
+            detachCurrentAccountLiveBindings();
+            return false;
+        }
+
+        const resolvedProfile = await service.resolveCustomerProfile(safeAuthUser, { force: true });
+        const customerId = String((resolvedProfile && resolvedProfile.customerId) || "").trim();
+        if (
+            service.liveCustomerAuthUid === String(safeAuthUser.uid || "").trim() &&
+            service.liveCustomerId === customerId &&
+            service.liveOrdersAuthUid === String(safeAuthUser.uid || "").trim() &&
+            service.liveOrdersRef
+        ) {
+            return true;
+        }
+
+        detachCurrentAccountLiveBindings();
+        service.liveCustomerAuthUid = String(safeAuthUser.uid || "").trim();
+        service.liveCustomerId = customerId;
+        service.liveOrdersAuthUid = String(safeAuthUser.uid || "").trim();
+
+        if (customerId) {
+            service.liveCustomerRef = service.getPrimaryDb().ref("khachhang/" + customerId);
+            service.liveCustomerHandler = function (snapshot) {
+                notifyCurrentCustomerLive(safeAuthUser, customerId, snapshot);
+            };
+            service.liveCustomerRef.on("value", service.liveCustomerHandler, function () {});
+        }
+
+        service.liveOrdersRef = service.getPrimaryDb()
+            .ref(getOrderSummaryBucketPath(safeAuthUser.uid))
+            .orderByChild("ts")
+            .limitToLast(LIVE_ORDER_SUMMARY_LIMIT);
+        service.liveOrdersAddedHandler = function (snapshot) {
+            upsertCurrentOrderLive(safeAuthUser.uid, snapshot);
+        };
+        service.liveOrdersChangedHandler = function (snapshot) {
+            upsertCurrentOrderLive(safeAuthUser.uid, snapshot);
+        };
+        service.liveOrdersRemovedHandler = function (snapshot) {
+            removeCurrentOrderLive(safeAuthUser.uid, snapshot).catch(function () { return null; });
+        };
+
+        service.liveOrdersRef.on("child_added", service.liveOrdersAddedHandler, function () {});
+        service.liveOrdersRef.on("child_changed", service.liveOrdersChangedHandler, function () {});
+        service.liveOrdersRef.on("child_removed", service.liveOrdersRemovedHandler, function () {});
+        return true;
+    }
+
+    function isMultiCatalogShardEnabled() {
+        return getCatalogDbsSafe().length > 1;
+    }
+
+    function getCatalogNodeUpdatedTs(node, sourceName) {
+        if (!node || typeof node !== "object") return 0;
+        if (sourceName === "sanpham") {
+            return Number((node.co_kh && node.co_kh.updated_ts) || 0) || 0;
+        }
+        return Number(node.updated_ts || 0) || 0;
+    }
+
+    async function loadMergedCatalogRows(sourceName) {
+        const config = getCatalogSourceConfig(sourceName);
+        const snapshots = await Promise.all(getCatalogDbsSafe().map(function (targetDb) {
+            return targetDb.ref(config.path).once("value").catch(function () { return null; });
+        }));
+        const mergedMap = {};
+        snapshots.forEach(function (snapshot) {
+            if (!snapshot || !snapshot.exists()) return;
+            snapshot.forEach(function (childSnapshot) {
+                if (childSnapshot.key === "__router__") return;
+                mergedMap[childSnapshot.key] = childSnapshot.val();
+            });
+        });
+        const rows = Object.keys(mergedMap).map(function (key) {
+            return {
+                key: key,
+                node: mergedMap[key]
+            };
+        }).sort(function (left, right) {
+            const tsDiff = getCatalogNodeUpdatedTs(right.node, sourceName) - getCatalogNodeUpdatedTs(left.node, sourceName);
+            if (tsDiff !== 0) return tsDiff;
+            return String(right.key || "").localeCompare(String(left.key || ""));
+        });
+        return {
+            config: config,
+            rows: rows,
+            highestTs: rows.reduce(function (maxTs, row) {
+                return Math.max(maxTs, getCatalogNodeUpdatedTs(row.node, sourceName));
+            }, 0)
+        };
+    }
+
     function detachCatalogLiveBindings() {
+        if (Array.isArray(service.catalogDeltaRefs) && service.catalogDeltaRefs.length) {
+            service.catalogDeltaRefs.forEach(function (entry) {
+                if (!entry || !entry.ref || typeof entry.ref.off !== "function" || typeof entry.handler !== "function") return;
+                entry.ref.off("child_added", entry.handler);
+                entry.ref.off("child_changed", entry.handler);
+                entry.ref.off("child_removed", entry.handler);
+            });
+        }
+        service.catalogDeltaRefs = [];
         if (service.catalogDeltaRef && service.catalogDeltaAddedHandler) {
             service.catalogDeltaRef.off("child_added", service.catalogDeltaAddedHandler);
         }
@@ -827,6 +1721,28 @@
     function attachCatalogLiveBindings(sourceName) {
         const safeSource = sourceName === "sanpham" ? "sanpham" : "catalog_public";
         if (!service.getCatalogDb()) return;
+        if (isMultiCatalogShardEnabled()) {
+            if (service.catalogLiveSource === safeSource && Array.isArray(service.catalogDeltaRefs) && service.catalogDeltaRefs.length) return;
+            detachCatalogLiveBindings();
+            service.catalogLiveSource = safeSource;
+            getCatalogDbsSafe().forEach(function (targetDb) {
+                const baseRef = targetDb.ref(safeSource);
+                const liveHandler = function () {
+                    clearTimeout(service.catalogLiveRefreshTimer);
+                    service.catalogLiveRefreshTimer = setTimeout(function () {
+                        service.syncCatalogDelta({
+                            force: true,
+                            pageSize: Math.max((getCatalogCache().products || []).length || 0, DEFAULT_PAGE_SIZE)
+                        }).catch(function () { return null; });
+                    }, 220);
+                };
+                baseRef.on("child_added", liveHandler, function () {});
+                baseRef.on("child_changed", liveHandler, function () {});
+                baseRef.on("child_removed", liveHandler, function () {});
+                service.catalogDeltaRefs.push({ ref: baseRef, handler: liveHandler });
+            });
+            return;
+        }
         if (service.catalogLiveSource === safeSource && service.catalogDeltaRef && service.catalogDeltaBaseRef) return;
 
         detachCatalogLiveBindings();
@@ -912,34 +1828,82 @@
     service.ensureReady = function () {
         if (service.readyPromise) return service.readyPromise;
 
-        service.readyPromise = new Promise(function (resolve, reject) {
+        service.readyPromise = new Promise(async function (resolve, reject) {
             try {
-                if (typeof firebase === "undefined") {
-                    reject(new Error("firebase-sdk-missing"));
-                    return;
-                }
-
-                if (!firebase.apps || firebase.apps.length === 0) {
-                    firebase.initializeApp(FIREBASE_MAIN_CONFIG);
-                }
-
+                await service.ensureCoreReady();
                 const primaryApp = firebase.app();
-                let catalogApp = null;
-                for (let i = 0; i < firebase.apps.length; i += 1) {
-                    if (firebase.apps[i].name === "RetailCatalog") {
-                        catalogApp = firebase.apps[i];
-                        break;
+                const localSharedSettings = readStorage("tas_sys_settings", {}) || {};
+                let remoteSharedSettings = {};
+                let publicRouterEntries = [];
+                try {
+                    const defaultCatalogApp = getOrInitNamedFirebaseApp("RetailCatalog", FIREBASE_CATALOG_CONFIG);
+                    const defaultCatalogDb = defaultCatalogApp.database ? defaultCatalogApp.database() : null;
+                    if (defaultCatalogDb) {
+                        const routerSnap = await defaultCatalogDb.ref("catalog_public/__router__").once("value");
+                        const routerValue = routerSnap.exists() ? (routerSnap.val() || {}) : {};
+                        if (Array.isArray(routerValue.shards) && routerValue.shards.length) {
+                            publicRouterEntries = routerValue.shards.map(function (entry, index) {
+                                const next = entry && typeof entry === "object" ? entry : {};
+                                return {
+                                    label: String(next.label || ("Catalog " + String(index + 1))),
+                                    appName: String(next.appName || ("RetailCatalogShard" + String(index + 1))),
+                                    config: {
+                                        apiKey: String(next.apiKey || ""),
+                                        authDomain: String(next.authDomain || ""),
+                                        databaseURL: String(next.databaseURL || ""),
+                                        projectId: String(next.projectId || ""),
+                                        storageBucket: String(next.storageBucket || ""),
+                                        messagingSenderId: String(next.messagingSenderId || ""),
+                                        appId: String(next.appId || ""),
+                                        measurementId: String(next.measurementId || "")
+                                    }
+                                };
+                            }).filter(function (entry) {
+                                return entry && entry.config && entry.config.databaseURL && entry.config.apiKey && entry.config.projectId;
+                            });
+                        }
                     }
+                } catch (error) {
+                    publicRouterEntries = [];
                 }
-                if (!catalogApp) catalogApp = firebase.initializeApp(FIREBASE_CATALOG_CONFIG, "RetailCatalog");
-
-                service.primaryDb = primaryApp.database();
-                service.catalogDb = catalogApp.database ? catalogApp.database() : service.primaryDb;
-                service.auth = primaryApp.auth();
-                service.catalogAuth = typeof catalogApp.auth === "function" ? catalogApp.auth() : null;
-                if (service.auth && service.auth.setPersistence && firebase.auth && firebase.auth.Auth && firebase.auth.Auth.Persistence) {
-                    service.auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(function () { return null; });
+                try {
+                    const remoteSettingsSnap = await service.primaryDb.ref("cauhinh/hethong").once("value");
+                    remoteSharedSettings = remoteSettingsSnap.exists() ? (remoteSettingsSnap.val() || {}) : {};
+                } catch (error) {
+                    remoteSharedSettings = {};
                 }
+                const syncSharedSettings = function (nextSettings) {
+                    const safeSettings = nextSettings && typeof nextSettings === "object"
+                        ? nextSettings
+                        : {};
+                    service.sharedSettings = safeSettings;
+                    writeStorage("tas_sys_settings", safeSettings);
+                };
+                const effectiveSharedSettings = Object.keys(remoteSharedSettings || {}).length
+                    ? remoteSharedSettings
+                    : localSharedSettings;
+                syncSharedSettings(effectiveSharedSettings);
+                try {
+                    if (service._sharedSettingsRef && service._sharedSettingsListener) {
+                        service._sharedSettingsRef.off("value", service._sharedSettingsListener);
+                    }
+                    service._sharedSettingsRef = service.primaryDb.ref("cauhinh/hethong");
+                    service._sharedSettingsListener = function (snapshot) {
+                        const liveSettings = snapshot && snapshot.exists() ? (snapshot.val() || {}) : {};
+                        const fallbackSettings = readStorage("tas_sys_settings", {}) || {};
+                        const effectiveSettings = Object.keys(liveSettings || {}).length ? liveSettings : fallbackSettings;
+                        syncSharedSettings(effectiveSettings);
+                        try {
+                            const nextEntries = getCatalogShardEntriesFromSettings(effectiveSettings);
+                            rebuildCatalogAppsFromEntries(nextEntries);
+                        } catch (error) {}
+                    };
+                    service._sharedSettingsRef.on("value", service._sharedSettingsListener);
+                } catch (error) {}
+                const catalogShardEntries = publicRouterEntries.length
+                    ? publicRouterEntries
+                    : getCatalogShardEntriesFromSettings(Object.keys(remoteSharedSettings || {}).length ? remoteSharedSettings : localSharedSettings);
+                rebuildCatalogAppsFromEntries(catalogShardEntries, { force: true });
                 resolve(service);
             } catch (error) {
                 reject(error);
@@ -957,25 +1921,18 @@
         return service.catalogDb || service.primaryDb;
     };
 
+    service.getCatalogDbs = function () {
+        return getCatalogDbsSafe();
+    };
+
     service.getAuth = function () {
         return service.auth;
     };
 
     service.ensureCatalogAccess = async function () {
         await service.ensureReady();
-        if (!service.catalogAuth || typeof service.catalogAuth.signInAnonymously !== "function") return false;
-        if (service.catalogAuth.currentUser) return true;
-        if (service.catalogAccessPromise) return service.catalogAccessPromise;
-
-        service.catalogAccessPromise = service.catalogAuth.signInAnonymously().then(function () {
-            return true;
-        }).catch(function () {
-            return false;
-        }).finally(function () {
-            service.catalogAccessPromise = null;
-        });
-
-        return service.catalogAccessPromise;
+        cleanupLegacyAnonymousSessions();
+        return false;
     };
 
     service.getCachedCatalog = function () {
@@ -992,6 +1949,7 @@
     service.loadCatalogPage = async function (options) {
         const opts = options || {};
         const reset = !!opts.reset;
+        const pageSize = Math.max(8, Number(opts.pageSize || DEFAULT_PAGE_SIZE) || DEFAULT_PAGE_SIZE);
 
         await service.ensureReady();
         if (service.catalogLoadState.loading) {
@@ -1002,6 +1960,31 @@
         service.catalogLoadState.loading = true;
 
         try {
+            await ensureProductDetailSheet(reset);
+            if (isMultiCatalogShardEnabled()) {
+                const cachedMulti = getCatalogCache();
+                const queryResult = await loadMergedCatalogRows("catalog_public");
+                const currentOffset = reset ? 0 : Number((cachedMulti.cursor && cachedMulti.cursor.offset) || (cachedMulti.products || []).length || 0);
+                const pageProducts = queryResult.rows
+                    .slice(currentOffset, currentOffset + pageSize)
+                    .map(function (row) { return normalizeCloudProductNode(row.key, row.node); })
+                    .filter(Boolean);
+                const mergedProducts = mergeProductLists(reset ? [] : cachedMulti.products, pageProducts);
+                const saved = setCatalogCache({
+                    products: mergedProducts,
+                    cursor: { offset: currentOffset + pageProducts.length },
+                    hasMore: (currentOffset + pageProducts.length) < queryResult.rows.length,
+                    lastDeltaTs: Number(queryResult.highestTs || 0) || 0,
+                    lastMetaTs: Number(queryResult.highestTs || 0) || 0,
+                    catalogSource: "catalog_public"
+                });
+                saveCatalogSourcePreference("catalog_public");
+                attachCatalogLiveBindings("catalog_public");
+                return Object.assign({}, saved, {
+                    pageProducts: pageProducts,
+                    source: "firebase"
+                });
+            }
             const preferredSource = readCatalogSourcePreference();
             const hasCatalogAccess = await service.ensureCatalogAccess();
             const candidateSources = []
@@ -1076,6 +2059,12 @@
         service.catalogLoadState.syncingDelta = true;
 
         try {
+            await ensureProductDetailSheet(!!opts.force);
+            if (isMultiCatalogShardEnabled()) {
+                const cachedMulti = getCatalogCache();
+                const requestedPageSize = Math.max((cachedMulti.products || []).length || 0, pageSize, DEFAULT_PAGE_SIZE);
+                return service.loadCatalogPage({ reset: true, pageSize: requestedPageSize });
+            }
             let cached = getCatalogCache();
             const startTs = Number(opts.force ? 0 : cached.lastDeltaTs || 0) || 0;
             if (!startTs) return service.loadCatalogPage({ reset: cached.products.length === 0, pageSize: Math.max(pageSize, DEFAULT_PAGE_SIZE) });
@@ -1156,25 +2145,79 @@
         }
         attachCatalogLiveBindings(readCatalogSourcePreference());
 
-        const hasCatalogAccess = await service.ensureCatalogAccess();
-        if (service.catalogMetaBound || !hasCatalogAccess) return;
+        if (service.catalogMetaBound || !service.getCatalogDb()) return;
         service.catalogMetaBound = true;
-        service.getCatalogDb().ref("metadata/last_update_products").on("value", function (snapshot) {
+        service.catalogMetaRef = service.getCatalogDb().ref("metadata/last_update_products");
+        service.catalogMetaHandler = function (snapshot) {
             const nextMetaTs = Number(snapshot.val() || 0) || 0;
             const cached = getCatalogCache();
             if (nextMetaTs && nextMetaTs > Number(cached.lastMetaTs || 0)) {
+                productDetailState.loadedAt = 0;
                 setCatalogCache(Object.assign({}, cached, { lastMetaTs: nextMetaTs }));
+                ensureProductDetailSheet(true).then(function () {
+                    const nextCache = refreshCatalogCacheWithProductDetails();
+                    notifyCatalogSubscribers({
+                        type: "catalog-detail",
+                        ts: nextMetaTs,
+                        source: readCatalogSourcePreference(),
+                        products: nextCache.products
+                    });
+                }).catch(function () { return null; });
                 notifyCatalogSubscribers({
                     type: "catalog-meta",
                     ts: nextMetaTs,
                     source: readCatalogSourcePreference()
                 });
             }
-        }, function () {});
+        };
+        service.catalogMetaRef.on("value", service.catalogMetaHandler, function () {});
+    };
+
+    service.subscribeAccountMeta = async function (onChange) {
+        await service.ensureReady();
+        if (typeof onChange === "function" && service.accountMetaSubscribers.indexOf(onChange) === -1) {
+            service.accountMetaSubscribers.push(onChange);
+        }
+        if (!service.liveAccountAuthBound && service.getAuth()) {
+            service.liveAccountAuthBound = true;
+            service.liveAccountAuthUnsubscribe = service.getAuth().onAuthStateChanged(function (user) {
+                if (!user || user.isAnonymous) {
+                    detachCurrentAccountLiveBindings();
+                    notifyAccountMetaSubscribers({ type: "account-signout" });
+                    return;
+                }
+                bindCurrentAccountLiveBindings(user).catch(function () { return null; });
+            });
+        }
+        bindCurrentAccountLiveBindings().catch(function () { return null; });
+        if (service.accountMetaBound || !service.getPrimaryDb()) return;
+
+        service.accountMetaBound = true;
+        [
+            { type: "orders-meta", key: "orders", path: "metadata/last_update_orders" },
+            { type: "customers-meta", key: "customers", path: "metadata/last_update_customers" }
+        ].forEach(function (entry) {
+            try {
+                service.getPrimaryDb().ref(entry.path).on("value", function (snapshot) {
+                    const nextTs = Number(snapshot && snapshot.val() || 0) || 0;
+                    const prevTs = Number((service.accountMetaTs && service.accountMetaTs[entry.key]) || 0) || 0;
+                    if (!nextTs) return;
+                    service.accountMetaTs[entry.key] = nextTs;
+                    if (!prevTs || nextTs <= prevTs) return;
+                    if (entry.key === "customers") {
+                        bindCurrentAccountLiveBindings().catch(function () { return null; });
+                    }
+                    notifyAccountMetaSubscribers({
+                        type: entry.type,
+                        ts: nextTs
+                    });
+                }, function () {});
+            } catch (error) {}
+        });
     };
 
     service.waitForAuthUser = async function (timeoutMs) {
-        await service.ensureReady();
+        await service.ensureCoreReady();
         const auth = service.getAuth();
         if (!auth) return null;
         if (auth.currentUser) return auth.currentUser;
@@ -1285,7 +2328,14 @@
             });
         }
 
-        if (resolvedProfile) service.saveCachedCustomer(resolvedProfile);
+        if (resolvedProfile) {
+            resolvedProfile.orders = [];
+            if (isInactiveCustomerStatus(resolvedProfile.status)) {
+                resolvedProfile.restrictedData = true;
+                service.saveCachedOrders(safeAuthUser.uid, []);
+            }
+            service.saveCachedCustomer(resolvedProfile);
+        }
         return resolvedProfile;
     };
 
@@ -1308,11 +2358,16 @@
             shippingPhone: String(seed.shippingPhone || seed.phone || "").trim(),
             avatar: "",
             facebook: "",
-            group: "Khach le tu web",
-            status: "online",
+            group: "Khách lẻ từ web",
+            status: "Hoạt động",
             bio: "An tam chon do tot cho be moi ngay.",
             gender: "Chua cap nhat",
             birthday: "",
+            maritalStatus: "Chua cap nhat",
+            age: "",
+            interests: [],
+            concerns: [],
+            favoriteProducts: [],
             personalInfo: "Thiet lap ngay",
             orders: [],
             totalOrders: 0,
@@ -1328,11 +2383,11 @@
         if (service.sessionBootPromise) return service.sessionBootPromise;
 
         service.sessionBootPromise = (async function () {
-            await service.ensureReady();
+            await service.ensureCoreReady();
             const authUser = await service.waitForAuthUser();
             if (!authUser || authUser.isAnonymous) return { user: null, profile: null };
 
-            let profile = await service.resolveCustomerProfile(authUser, { force: false });
+            let profile = await service.resolveCustomerProfile(authUser, { force: true });
             if (!profile) profile = await service.ensureCustomerProfile({
                 name: authUser.displayName || "",
                 email: authUser.email || ""
@@ -1350,23 +2405,31 @@
     };
 
     service.persistCustomerProfile = async function (profileData, options) {
-        await service.ensureReady();
+        await service.ensureCoreReady();
         const authUser = (options && options.authUser) || await service.waitForAuthUser();
         if (!authUser) throw new Error("not-authenticated");
 
         const existing = await service.resolveCustomerProfile(authUser, { force: true });
         const merged = Object.assign({}, existing || {}, profileData || {});
         const customerId = String(merged.customerId || merged.id || "").trim() || ("KHW" + String(Date.now()).slice(-9));
-        const email = String(merged.email || "").trim() || buildFallbackEmail(merged.phone, authUser);
+        const protectedContacts = resolveLockedProfileContacts(authUser, existing, merged);
         const safeProfile = Object.assign({}, merged, {
             customerId: customerId,
             authUid: authUser.uid,
-            email: email,
-            group: String(merged.group || "Khach le tu web").trim(),
-            status: normalizeCustomerStatus(merged.status || "online"),
+            email: protectedContacts.email,
+            phone: protectedContacts.phone,
+            loginMethod: protectedContacts.loginMethod,
+            group: String(merged.group || "Khách lẻ từ web").trim(),
+            status: normalizeCustomerStatus(merged.status || "Hoạt động"),
             bio: String(merged.bio || (existing && existing.bio) || "An tam chon do tot cho be moi ngay.").trim(),
             gender: String(merged.gender || (existing && existing.gender) || "Chua cap nhat").trim(),
             birthday: String(merged.birthday || (existing && existing.birthday) || "").trim(),
+            maritalStatus: String(merged.maritalStatus || (existing && existing.maritalStatus) || "Chua cap nhat").trim(),
+            age: String(merged.age || (existing && existing.age) || "").trim(),
+            interests: normalizeTextList(merged.interests || (existing && existing.interests) || []),
+            concerns: normalizeTextList(merged.concerns || (existing && existing.concerns) || []),
+            favoriteProducts: normalizeTextList(merged.favoriteProducts || (existing && existing.favoriteProducts) || []),
+            zalo: String(merged.zalo || (existing && existing.zalo) || "").trim(),
             personalInfo: String(merged.personalInfo || (existing && existing.personalInfo) || "Thiet lap ngay").trim(),
             avatar: String(merged.avatar || (existing && existing.avatar) || "").trim(),
             facebook: String(merged.facebook || (existing && existing.facebook) || "").trim(),
@@ -1375,15 +2438,16 @@
             totalOrders: Number(merged.totalOrders || 0) || 0,
             totalBuy: Number(merged.totalBuy || 0) || 0,
             payments: Array.isArray(merged.payments) ? merged.payments : [],
-            addresses: ensureAddressList(merged.addresses, merged.address, customerId, merged.shippingPhone || merged.phone),
-            shippingPhone: String(merged.shippingPhone || (existing && existing.shippingPhone) || merged.phone || "").trim()
+            addresses: ensureAddressList(merged.addresses, merged.address, customerId, merged.shippingPhone || merged.phone || protectedContacts.phone),
+            shippingPhone: String(merged.shippingPhone || (existing && existing.shippingPhone) || merged.phone || protectedContacts.phone || "").trim()
         });
         const customerPayload = buildCustomerWritePayload(customerId, authUser.uid, safeProfile, {
             updatedTs: Number((options && options.updatedTs) || safeProfile.updatedTs || Date.now()) || Date.now(),
             includeFinance: !!(options && options.includeFinance),
             includeSecurity: typeof (options && options.includeSecurity) === "boolean"
                 ? !!options.includeSecurity
-                : !(existing && existing.customerId)
+                : !(existing && existing.customerId),
+            passwordForSync: String((options && options.passwordForSync) || (profileData && profileData.pass) || "").trim()
         });
         const primaryDb = service.getPrimaryDb();
         await primaryDb.ref().update(customerPayload.updates);
@@ -1392,18 +2456,363 @@
     };
 
     service.ensureCheckoutAuthUser = async function () {
-        await service.ensureReady();
+        await service.ensureCoreReady();
         const auth = service.getAuth();
         if (!auth) return null;
-        if (auth.currentUser) return auth.currentUser;
-        if (typeof auth.signInAnonymously !== "function") return null;
-        const credential = await auth.signInAnonymously();
-        return (credential && credential.user) || auth.currentUser || null;
+        if (auth.currentUser && !auth.currentUser.isAnonymous) return auth.currentUser;
+        if (auth.currentUser && auth.currentUser.isAnonymous) {
+            try { await auth.signOut(); } catch (error) {}
+        }
+        return null;
     };
+
+    service.loginWithGoogle = async function () {
+        await service.ensureCoreReady();
+        const auth = service.getAuth();
+        if (!auth || !firebase.auth || typeof firebase.auth.GoogleAuthProvider !== "function") {
+            throw new Error("google-provider-unavailable");
+        }
+        if (auth.currentUser && auth.currentUser.isAnonymous) {
+            try { await auth.signOut(); } catch (error) {}
+        }
+
+        const provider = new firebase.auth.GoogleAuthProvider();
+        provider.addScope("email");
+        provider.addScope("profile");
+        if (typeof provider.setCustomParameters === "function") {
+            provider.setCustomParameters({ prompt: "select_account" });
+        }
+
+        const credential = await auth.signInWithPopup(provider);
+        const authUser = (credential && credential.user) || auth.currentUser || null;
+        if (!authUser) throw new Error("google-auth-failed");
+
+        let profile = await service.resolveCustomerProfile(authUser, { force: true });
+        if (!profile) {
+            try {
+                profile = await service.ensureCustomerProfile({
+                    name: authUser.displayName || "",
+                    email: authUser.email || "",
+                    phone: "",
+                    address: ""
+                });
+            } catch (error) {
+                const rawMessage = String((error && (error.code || error.message)) || "").toLowerCase();
+                if (rawMessage.indexOf("permission") === -1 && rawMessage.indexOf("denied") === -1) throw error;
+                profile = buildLocalFallbackProfile({
+                    customerId: readStorage(STORAGE_KEYS.customerId, "") || ("KHW" + String(Date.now()).slice(-9)),
+                    authUid: authUser.uid,
+                    name: authUser.displayName || "Khach le tu web",
+                    email: authUser.email || buildFallbackEmail("", authUser),
+                    phone: "",
+                    shippingPhone: "",
+                    address: "",
+                    addresses: [],
+                    updatedTs: Date.now()
+                }, authUser);
+                service.saveCachedCustomer(profile);
+            }
+        }
+
+        return {
+            authUser: authUser,
+            profile: profile,
+            isNewUser: !!(credential && credential.additionalUserInfo && credential.additionalUserInfo.isNewUser)
+        };
+    };
+
+    service.registerWithGoogle = async function () {
+        return service.loginWithGoogle();
+    };
+
+    async function submitGuestOrderViaGas_(payload) {
+        const data = payload || {};
+        const rawItems = Array.isArray(data.items) ? data.items : [];
+        if (!rawItems.length) throw new Error("empty-cart");
+
+        const safeName = String(data.customerName || "Khach le web").trim();
+        const safePhone = String(data.phone || "").trim();
+        const safeAddress = String(data.address || "").trim();
+        if (!safePhone || !safeAddress) throw new Error("missing-shipping-info");
+
+        const now = new Date();
+        const sortTs = Date.now();
+        const orderId = "DH" + String(sortTs).slice(-10);
+        const customerId = "KHW" + String(sortTs).slice(-9);
+        const subtotal = Number(data.totalAmount || 0) || 0;
+        const discountPercent = Number(data.discountPercent || 0) || 0;
+        const discountValue = Number(data.discountValue || 0) || 0;
+        const finalAmount = Number(data.finalAmount || subtotal) || 0;
+        const paidAmount = Number(data.paidAmount || 0) || 0;
+        const debtAmount = Math.max(finalAmount - paidAmount, 0);
+        const dateText = now.toLocaleString("vi-VN");
+        const safeEmail = String(data.email || buildFallbackEmail(safePhone, null)).trim();
+        const safeNote = String(data.note || "").trim();
+        const items = rawItems.map(function (item) {
+            const quantity = Number(item.quantity || item.qty || 1) || 1;
+            const priceValue = parseMoney(item.priceValue || item.price || 0);
+            return {
+                id: String(item.id || item.rootId || "").trim(),
+                rootId: String(item.id || item.rootId || "").trim(),
+                code: String(item.code || "").trim(),
+                name: String(item.name || "San pham").trim(),
+                qty: quantity,
+                price: priceValue,
+                unit: String(item.unit || "").trim(),
+                img: String(item.img || "").trim(),
+                discount: 0,
+                discountType: "%",
+                variantInfo: String(item.variantInfo || "").trim()
+            };
+        });
+        const orderInfo = {
+            id: orderId,
+            date: dateText,
+            sort_ts: sortTs,
+            last_update: dateText,
+            note: safeNote || "Don hang guest tu web",
+            status: 1,
+            customer_id: customerId,
+            customer_name: safeName,
+            customer_auth_uid: "",
+            owner_uid: "",
+            phone: safePhone,
+            email: safeEmail,
+            subtotal: subtotal,
+            discount: discountValue,
+            discount_value: discountValue,
+            discount_percent: discountPercent,
+            shipping_fee: Number(data.shippingFee || 0) || 0,
+            shipping_payer: String(data.shippingPayer || "shop").trim(),
+            vat_rate: Number(data.vatRate || 0) || 0,
+            total_amount: finalAmount,
+            paid_amount: paidAmount,
+            debt: debtAmount,
+            old_debt: 0,
+            debt_before: 0,
+            debt_after: debtAmount,
+            source: "Web le guest",
+            shipping_info: safeAddress,
+            payment_method: String(data.paymentMethod || "pending").trim(),
+            carrier: "web_le_guest",
+            creator: "Khach guest web",
+            price_type: String(data.priceType || "gia_si_web").trim(),
+            hour: now.getHours(),
+            items: items
+        };
+        const gasConfig = getProductDetailSheetConfig();
+        const gasUrl = String(gasConfig.gasUrl || "").trim();
+        if (!gasUrl) throw new Error("gas-backend-missing");
+
+        const response = await fetch(gasUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                action: "new_order",
+                allow_guest: true,
+                data: orderInfo
+            })
+        });
+        const text = await response.text();
+        let result = {};
+        try {
+            result = text ? JSON.parse(text) : {};
+        } catch (error) {
+            throw new Error("guest-order-json-invalid");
+        }
+        if (!response.ok || result.status !== "success") {
+            throw new Error(String(result.message || "guest-order-failed"));
+        }
+
+        return {
+            id: orderId,
+            summary: normalizeOrderSummary(orderId, {
+                in4: minifyData(orderInfo),
+                ch_t: minifyData({
+                    items: items,
+                    note: safeNote || "Don dat tu web"
+                })
+            }),
+            detail: {
+                id: orderId,
+                ownerUid: "",
+                note: safeNote || "Don dat tu web",
+                items: items.map(function (item) { return normalizeOrderItem(item); })
+            },
+            persisted: false,
+            storageMode: "gas-fallback"
+        };
+    }
+
+    function isPermissionDeniedError_(error) {
+        const rawCode = String((error && error.code) || "").trim().toLowerCase();
+        const rawMessage = String((error && error.message) || "").trim().toLowerCase();
+        const joined = rawCode + " " + rawMessage;
+        return joined.indexOf("permission") >= 0 || joined.indexOf("denied") >= 0;
+    }
+
+    function mergeOrderListsById_(baseOrders, nextOrders) {
+        const mergedMap = {};
+        []
+            .concat(Array.isArray(baseOrders) ? baseOrders : [])
+            .concat(Array.isArray(nextOrders) ? nextOrders : [])
+            .forEach(function (order) {
+                if (!order || !order.id) return;
+                const current = mergedMap[order.id] || {};
+                mergedMap[order.id] = Object.assign({}, current, order, {
+                    items: Array.isArray(order.items) && order.items.length
+                        ? order.items
+                        : (Array.isArray(current.items) ? current.items : [])
+                });
+            });
+        return Object.keys(mergedMap).map(function (orderId) {
+            return mergedMap[orderId];
+        }).sort(function (left, right) {
+            return (Number((right && right.sortTs) || 0) || 0) - (Number((left && left.sortTs) || 0) || 0);
+        });
+    }
+
+    function reconcileOrderListsWithCloud_(cachedOrders, cloudOrders) {
+        const safeCloudOrders = Array.isArray(cloudOrders) ? cloudOrders : [];
+        const cloudIds = new Set(safeCloudOrders.map(function (order) {
+            return String((order && order.id) || "").trim();
+        }).filter(Boolean));
+        const preservedCachedOrders = (Array.isArray(cachedOrders) ? cachedOrders : []).filter(function (order) {
+            const safeOrderId = String((order && order.id) || "").trim();
+            if (!safeOrderId) return false;
+            if (cloudIds.has(safeOrderId)) return true;
+            const storageMode = String((order && order.storageMode) || "").trim().toLowerCase();
+            const isPersisted = typeof (order && order.persisted) === "boolean"
+                ? !!order.persisted
+                : storageMode !== "gas-fallback";
+            return !isPersisted || storageMode === "gas-fallback";
+        });
+        return mergeOrderListsById_(preservedCachedOrders, safeCloudOrders);
+    }
+
+    function saveMergedOrderSummary_(authUid, summary) {
+        const cached = service.getCachedOrders();
+        const baseOrders = cached && String(cached.authUid || "") === String(authUid || "") && Array.isArray(cached.orders)
+            ? cached.orders
+            : [];
+        const nextOrders = mergeOrderListsById_(baseOrders, [summary]);
+        service.saveCachedOrders(authUid, nextOrders);
+        return summary;
+    }
+
+    function buildOrderResult_(orderId, orderInfo, orderDetail, options) {
+        const opts = options || {};
+        const summary = normalizeOrderSummary(orderId, {
+            in4: minifyData(orderInfo),
+            ch_t: minifyData(orderDetail)
+        });
+        summary.persisted = opts.persisted !== false;
+        summary.storageMode = String(opts.storageMode || (summary.persisted ? "firebase" : "gas-fallback")).trim();
+        if (opts.ownerUid) summary.ownerUid = String(opts.ownerUid || "").trim();
+        if (opts.customerAuthUid) summary.customerAuthUid = String(opts.customerAuthUid || "").trim();
+        return {
+            id: orderId,
+            summary: summary,
+            detail: {
+                id: orderId,
+                ownerUid: summary.ownerUid || "",
+                note: String(orderDetail && orderDetail.note || "").trim(),
+                items: Array.isArray(orderDetail && orderDetail.items)
+                    ? orderDetail.items.map(function (item) { return normalizeOrderItem(item); })
+                    : []
+            },
+            persisted: summary.persisted,
+            storageMode: summary.storageMode
+        };
+    }
+
+    async function postOrderViaGasBackend_(orderInfo) {
+        const gasConfig = getProductDetailSheetConfig();
+        const gasUrl = String(gasConfig.gasUrl || "").trim();
+        if (!gasUrl) throw new Error("gas-backend-missing");
+
+        const response = await fetch(gasUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                action: "new_order",
+                allow_guest: true,
+                data: orderInfo
+            })
+        });
+        const text = await response.text();
+        let result = {};
+        try {
+            result = text ? JSON.parse(text) : {};
+        } catch (error) {
+            throw new Error("guest-order-json-invalid");
+        }
+        if (!response.ok || result.status !== "success") {
+            throw new Error(String(result.message || "guest-order-failed"));
+        }
+        return result;
+    }
+
+    function buildCachedOrderInfoFromSummary_(summary, authUser) {
+        const safeSummary = summary && typeof summary === "object" ? summary : {};
+        const safeAuthUid = String((authUser && authUser.uid) || safeSummary.ownerUid || safeSummary.customerAuthUid || "").trim();
+        return {
+            id: String(safeSummary.id || "").trim(),
+            status: Number(safeSummary.rawStatus || 1) || 1,
+            owner_uid: safeSummary.ownerUid || safeAuthUid,
+            customer_auth_uid: safeSummary.customerAuthUid || safeAuthUid,
+            customer_id: String(safeSummary.customerId || "").trim(),
+            customer_name: String(safeSummary.customerName || "").trim(),
+            phone: String(safeSummary.phone || "").trim(),
+            subtotal: Number(safeSummary.subtotal || safeSummary.totalAmount || 0) || 0,
+            discount_value: Number(safeSummary.discountValue || 0) || 0,
+            discount_percent: Number(safeSummary.discountPercent || 0) || 0,
+            shipping_fee: Number(safeSummary.shippingFee || 0) || 0,
+            shipping_payer: String(safeSummary.shippingPayer || "shop").trim(),
+            total_amount: Number(safeSummary.finalAmount || safeSummary.totalAmount || 0) || 0,
+            paid_amount: Number(safeSummary.paidAmount || 0) || 0,
+            debt: Number(safeSummary.debt || 0) || 0,
+            source: String(safeSummary.source || "Web le").trim(),
+            shipping_info: safeSummary.shippingInfo || "",
+            payment_method: String(safeSummary.paymentMethod || "pending").trim(),
+            price_type: String(safeSummary.priceType || "gia_si_web").trim(),
+            creator: String(safeSummary.creator || "Khach tu web").trim(),
+            carrier: String(safeSummary.carrier || "web_le").trim(),
+            tracking_code: String(safeSummary.trackingCode || "").trim(),
+            note: String(safeSummary.note || "").trim(),
+            date: String(safeSummary.date || new Date(Number(safeSummary.sortTs || Date.now()) || Date.now()).toLocaleString("vi-VN")).trim(),
+            last_update: String(safeSummary.date || new Date().toLocaleString("vi-VN")).trim(),
+            sort_ts: Number(safeSummary.sortTs || Date.now()) || Date.now()
+        };
+    }
+
+    function buildCachedOrderDetailFromSummary_(summary) {
+        const safeSummary = summary && typeof summary === "object" ? summary : {};
+        return {
+            note: String(safeSummary.note || "Don dat tu web").trim(),
+            items: (Array.isArray(safeSummary.items) ? safeSummary.items : []).map(function (item) {
+                const priceValue = Number((item && item.priceValue) || 0) || parseMoney(item && item.price || 0);
+                const rootId = String((item && (item.rootId || item.id)) || "").trim();
+                return {
+                    id: rootId,
+                    rootId: rootId,
+                    code: String((item && item.code) || "").trim(),
+                    name: String((item && item.name) || "San pham").trim(),
+                    qty: Number((item && (item.quantity || item.qty)) || 1) || 1,
+                    price: priceValue,
+                    unit: String((item && item.unit) || "").trim(),
+                    img: String((item && item.img) || "").trim(),
+                    discount: 0,
+                    discountType: "%",
+                    variantInfo: String((item && item.variantInfo) || "").trim()
+                };
+            })
+        };
+    }
 
     service.registerCustomer = async function (payload) {
         const data = payload || {};
-        await service.ensureReady();
+        await service.ensureCoreReady();
         const auth = service.getAuth();
         if (auth && auth.currentUser && auth.currentUser.isAnonymous) {
             try { await auth.signOut(); } catch (error) {}
@@ -1431,12 +2840,18 @@
                 shippingPhone: safePhone,
                 address: safeAddress,
                 addresses: ensureAddressList([], safeAddress, "", safePhone),
-                status: "online",
+                status: "Hoạt động",
+                maritalStatus: "Chưa cập nhật",
+                age: "",
+                interests: [],
+                concerns: [],
+                favoriteProducts: [],
                 updatedTs: Date.now()
             }, {
                 authUser: credential.user,
                 updatedTs: Date.now(),
-                includeSecurity: true
+                includeSecurity: true,
+                passwordForSync: safePassword
             });
             return {
                 authUser: credential.user,
@@ -1452,7 +2867,12 @@
                     shippingPhone: safePhone,
                     address: safeAddress,
                     addresses: ensureAddressList([], safeAddress, "", safePhone),
-                    status: "online",
+                    status: "Hoạt động",
+                    maritalStatus: "Chưa cập nhật",
+                    age: "",
+                    interests: [],
+                    concerns: [],
+                    favoriteProducts: [],
                     updatedTs: Date.now()
                 }, credential.user);
                 service.saveCachedCustomer(fallbackProfile);
@@ -1472,7 +2892,7 @@
     };
 
     service.loginCustomer = async function (identifier, password) {
-        await service.ensureReady();
+        await service.ensureCoreReady();
         const auth = service.getAuth();
         if (auth && auth.currentUser && auth.currentUser.isAnonymous) {
             try { await auth.signOut(); } catch (error) {}
@@ -1537,6 +2957,7 @@
             }), { authUser: credential.user, updatedTs: Date.now() });
         }
         if (profile && profile.phone) rememberPhoneLogin(profile.phone, (credential.user && credential.user.email) || profile.email);
+        if (profile && isInactiveCustomerStatus(profile.status)) service.saveCachedOrders(credential.user.uid, []);
 
         return {
             authUser: credential.user,
@@ -1545,7 +2966,7 @@
     };
 
     service.requestPasswordReset = async function (identifier) {
-        await service.ensureReady();
+        await service.ensureCoreReady();
         const safeIdentifier = String(identifier || "").trim().toLowerCase();
         if (!safeIdentifier) throw new Error("missing-reset-identifier");
         if (safeIdentifier.indexOf("@") < 0 || isPhoneAliasEmail(safeIdentifier)) {
@@ -1556,7 +2977,7 @@
     };
 
     service.changePassword = async function (currentPassword, nextPassword) {
-        await service.ensureReady();
+        await service.ensureCoreReady();
         const authUser = await service.waitForAuthUser();
         if (!authUser || !authUser.email) throw new Error("not-authenticated");
         const safeCurrentPassword = String(currentPassword || "");
@@ -1566,11 +2987,18 @@
         const credential = firebase.auth.EmailAuthProvider.credential(authUser.email, safeCurrentPassword);
         await authUser.reauthenticateWithCredential(credential);
         await authUser.updatePassword(safeNextPassword);
+        const existingProfile = await service.resolveCustomerProfile(authUser, { force: true });
+        await service.persistCustomerProfile(existingProfile || {}, {
+            authUser: authUser,
+            updatedTs: Date.now(),
+            includeSecurity: true,
+            passwordForSync: safeNextPassword
+        });
         return true;
     };
 
     service.logout = async function () {
-        await service.ensureReady();
+        await service.ensureCoreReady();
         try {
             await service.getAuth().signOut();
         } finally {
@@ -1580,7 +3008,7 @@
     };
 
     service.updateCurrentCustomerProfile = async function (nextProfile) {
-        await service.ensureReady();
+        await service.ensureCoreReady();
         const authUser = await service.waitForAuthUser();
         if (!authUser) throw new Error("not-authenticated");
 
@@ -1612,29 +3040,63 @@
         return safePayload.orders;
     };
 
+    service.hasLiveAccountBindings = function (authUid) {
+        const safeAuthUid = String(authUid || "").trim();
+        if (!safeAuthUid) return false;
+        return service.liveOrdersAuthUid === safeAuthUid || service.liveCustomerAuthUid === safeAuthUid;
+    };
+
     service.loadOrders = async function (options) {
         const opts = options || {};
         await service.ensureReady();
         const authUser = await service.waitForAuthUser();
         if (!authUser) return [];
 
+        const profile = await service.resolveCustomerProfile(authUser, { force: !!opts.force });
+        if (profile && isInactiveCustomerStatus(profile.status)) {
+            service.saveCachedOrders(authUser.uid, []);
+            return [];
+        }
+
         const cached = service.getCachedOrders();
         if (!opts.force && cached && String(cached.authUid || "") === String(authUser.uid) && Array.isArray(cached.orders)) {
             return cached.orders;
         }
 
-        const snapshot = await service.getPrimaryDb().ref("donhang/" + authUser.uid).orderByChild("in4/ts").limitToLast(Math.max(Number(opts.limit || DEFAULT_ORDER_LIMIT) || DEFAULT_ORDER_LIMIT, 10)).once("value");
+        const limit = Math.max(Number(opts.limit || DEFAULT_ORDER_LIMIT) || DEFAULT_ORDER_LIMIT, 10);
+        let snapshot = null;
+        let useLegacyOrders = false;
+        try {
+            snapshot = await service.getPrimaryDb()
+                .ref(getOrderSummaryBucketPath(authUser.uid))
+                .orderByChild("ts")
+                .limitToLast(Math.max(limit, 10))
+                .once("value");
+            if (!snapshot.exists()) useLegacyOrders = true;
+        } catch (error) {
+            useLegacyOrders = true;
+        }
+        if (useLegacyOrders) {
+            snapshot = await service.getPrimaryDb().ref("donhang/" + authUser.uid).orderByChild("in4/ts").limitToLast(limit).once("value");
+        }
         const orders = [];
         snapshot.forEach(function (childSnapshot) {
-            orders.push(normalizeOrderSummary(childSnapshot.key, childSnapshot.val()));
+            orders.push(
+                useLegacyOrders
+                    ? normalizeOrderSummary(childSnapshot.key, childSnapshot.val())
+                    : normalizeOrderSummaryFromMirror(childSnapshot.key, childSnapshot.val())
+            );
         });
 
         orders.sort(function (a, b) {
             return (Number(b.sortTs || 0) || 0) - (Number(a.sortTs || 0) || 0);
         });
 
-        service.saveCachedOrders(authUser.uid, orders);
-        return orders;
+        const mergedOrders = cached && String(cached.authUid || "") === String(authUser.uid) && Array.isArray(cached.orders)
+            ? reconcileOrderListsWithCloud_(cached.orders, orders)
+            : orders;
+        service.saveCachedOrders(authUser.uid, mergedOrders);
+        return mergedOrders;
     };
 
     service.loadOrderDetail = async function (orderId) {
@@ -1647,30 +3109,55 @@
             ? cachedOrders.orders.find(function (order) { return String((order && order.id) || "") === String(orderId); })
             : null;
         const ownerUid = String((cachedOrder && (cachedOrder.ownerUid || cachedOrder.customerAuthUid)) || authUser.uid || "").trim();
-        const snapshot = await service.getPrimaryDb().ref("donhang/" + ownerUid + "/" + orderId + "/ch_t").once("value");
-        if (!snapshot.exists()) return null;
-        const detail = unminifyData(snapshot.val() || {});
-        const items = Array.isArray(detail.items) ? detail.items.map(function (item) {
-            return normalizeOrderItem(item);
-        }) : [];
-        return {
-            id: orderId,
-            ownerUid: ownerUid,
-            note: String(detail.note || "").trim(),
-            items: items
-        };
+        const fallbackDetail = cachedOrder
+            ? {
+                id: orderId,
+                ownerUid: ownerUid,
+                note: String(cachedOrder.note || "").trim(),
+                items: Array.isArray(cachedOrder.items) ? cachedOrder.items : []
+            }
+            : null;
+        try {
+            const snapshot = await service.getPrimaryDb().ref("donhang/" + ownerUid + "/" + orderId + "/ch_t").once("value");
+            if (!snapshot.exists()) return fallbackDetail;
+            const detail = unminifyData(snapshot.val() || {});
+            const items = Array.isArray(detail.items) ? detail.items.map(function (item) {
+                return normalizeOrderItem(item);
+            }) : [];
+            return {
+                id: orderId,
+                ownerUid: ownerUid,
+                note: String(detail.note || "").trim(),
+                items: items
+            };
+        } catch (error) {
+            if (fallbackDetail) return fallbackDetail;
+            throw error;
+        }
     };
+
+    async function touchOrdersMetaTimestamp_(timestamp) {
+        const safeTimestamp = Number(timestamp || Date.now()) || Date.now();
+        try {
+            await service.getPrimaryDb().ref("metadata/last_update_orders").set(safeTimestamp);
+        } catch (error) {
+            console.warn("Khong cap nhat duoc metadata don hang:", error);
+        }
+    }
 
     service.cancelOrder = async function (orderId) {
         await service.ensureReady();
         const authUser = await service.waitForAuthUser();
         if (!authUser || !orderId) throw new Error("not-authenticated");
 
-        const orderRef = service.getPrimaryDb().ref("donhang/" + authUser.uid + "/" + orderId + "/in4");
-        const snapshot = await orderRef.once("value");
+        const hasCatalogAccess = await service.ensureCatalogAccess().catch(function () {
+            return false;
+        });
+        const orderBaseRef = service.getPrimaryDb().ref("donhang/" + authUser.uid + "/" + orderId);
+        const snapshot = await orderBaseRef.once("value");
         if (!snapshot.exists()) throw new Error("order-not-found");
 
-        const rawInfo = unminifyData(snapshot.val() || {});
+        const rawInfo = unminifyData((snapshot.child("in4").val()) || {});
         const rawStatus = Number(rawInfo.status || rawInfo.st || 0) || 0;
         if (rawStatus !== 1) throw new Error("order-not-cancellable");
         if (String(rawInfo.owner_uid || rawInfo.ou || "").trim() !== String(authUser.uid || "").trim()) {
@@ -1680,11 +3167,22 @@
             throw new Error("permission-denied");
         }
 
+        const detail = unminifyData((snapshot.child("ch_t").val()) || {});
         const nextInfo = Object.assign({}, rawInfo, {
             status: 5,
             last_update: new Date().toLocaleString("vi-VN")
         });
-        await orderRef.set(minifyData(nextInfo));
+        await orderBaseRef.child("in4").set(minifyData(nextInfo));
+        await writeOrderSummaryMirror_(authUser.uid, orderId, nextInfo);
+        await touchOrdersMetaTimestamp_(Date.now());
+
+        const pendingMap = buildPendingReservationMap(Array.isArray(detail.items) ? detail.items : []);
+        const revertMap = {};
+        Object.keys(pendingMap).forEach(function (productId) {
+            revertMap[productId] = -Math.max(Number(pendingMap[productId] || 0) || 0, 0);
+        });
+        await syncPendingReservationDelta(revertMap, Date.now(), hasCatalogAccess);
+        applyPendingReservationDeltaToCatalog(revertMap, Date.now());
 
         const cached = service.getCachedOrders();
         let updatedOrder = normalizeOrderSummary(orderId, { in4: minifyData(nextInfo) });
@@ -1705,11 +3203,206 @@
         return updatedOrder;
     };
 
+    service.updateOrder = async function (orderId, payload) {
+        const data = payload || {};
+        await service.ensureReady();
+        const authUser = await service.ensureCheckoutAuthUser();
+        if (!authUser || !orderId) throw new Error("not-authenticated");
+        const hasCatalogAccess = await service.ensureCatalogAccess().catch(function () {
+            return false;
+        });
+
+        const orderBaseRef = service.getPrimaryDb().ref("donhang/" + authUser.uid + "/" + orderId);
+        const cachedOrders = service.getCachedOrders();
+        const cachedOrder = cachedOrders && String(cachedOrders.authUid || "") === String(authUser.uid || "") && Array.isArray(cachedOrders.orders)
+            ? cachedOrders.orders.find(function (order) { return String((order && order.id) || "") === String(orderId || ""); })
+            : null;
+        let snapshot = null;
+        let hasFirebaseSnapshot = false;
+        try {
+            snapshot = await orderBaseRef.once("value");
+            hasFirebaseSnapshot = !!(snapshot && snapshot.exists());
+        } catch (error) {
+            if (!isPermissionDeniedError_(error)) throw error;
+        }
+        if (!hasFirebaseSnapshot && !cachedOrder) throw new Error("order-not-found");
+
+        const rawInfo = hasFirebaseSnapshot
+            ? unminifyData((snapshot.child("in4").val()) || {})
+            : buildCachedOrderInfoFromSummary_(cachedOrder, authUser);
+        const rawDetail = hasFirebaseSnapshot
+            ? unminifyData((snapshot.child("ch_t").val()) || {})
+            : buildCachedOrderDetailFromSummary_(cachedOrder);
+        const rawStatus = Number(rawInfo.status || rawInfo.st || 0) || 0;
+        if (rawStatus !== 1) throw new Error("order-not-editable");
+        if (String(rawInfo.owner_uid || rawInfo.ou || authUser.uid || "").trim() !== String(authUser.uid || "").trim()) {
+            throw new Error("permission-denied");
+        }
+        if (String(rawInfo.customer_auth_uid || rawInfo.cau || authUser.uid || "").trim() !== String(authUser.uid || "").trim()) {
+            throw new Error("permission-denied");
+        }
+
+        const rawItems = Array.isArray(data.items) ? data.items : [];
+        if (!rawItems.length) throw new Error("empty-cart");
+
+        let profile = service.getCachedCustomer ? service.getCachedCustomer() : null;
+        if (!profile || String((profile && profile.authUid) || "") !== String(authUser.uid || "")) {
+            try {
+                profile = await service.resolveCustomerProfile(authUser, { force: false });
+            } catch (error) {
+                profile = null;
+            }
+        }
+
+        const sortTs = Date.now();
+        const lastUpdateText = new Date(sortTs).toLocaleString("vi-VN");
+        const previousFinalAmount = Number(rawInfo.total_amount || 0) || 0;
+        const previousPaidAmount = Number(rawInfo.paid_amount || 0) || 0;
+        const previousDebt = Number(rawInfo.debt || Math.max(previousFinalAmount - previousPaidAmount, 0)) || 0;
+        const safeName = String(data.customerName || rawInfo.customer_name || (profile && profile.name) || "Khach le web").trim();
+        const safePhone = String(data.phone || rawInfo.phone || (profile && profile.shippingPhone) || (profile && profile.phone) || "").trim();
+        const safeAddress = String(data.address || rawInfo.shipping_info || (profile && profile.address) || "").trim();
+        const safeEmail = String(data.email || (profile && profile.email) || buildFallbackEmail(safePhone, authUser)).trim();
+        const safeNote = String(data.note || rawInfo.note || "").trim();
+        const subtotal = Number(data.totalAmount || 0) || 0;
+        const discountPercent = Number(data.discountPercent || 0) || 0;
+        const discountValue = Number(data.discountValue || 0) || 0;
+        const finalAmount = Number(data.finalAmount || subtotal) || 0;
+        const paidAmount = Number(data.paidAmount || rawInfo.paid_amount || 0) || 0;
+        const debtAmount = Math.max(finalAmount - paidAmount, 0);
+        const customerId = String(rawInfo.customer_id || (profile && profile.customerId) || readStorage(STORAGE_KEYS.customerId, "") || ("KHW" + String(sortTs).slice(-9))).trim();
+        const items = rawItems.map(function (item) {
+            const quantity = Number(item.quantity || item.qty || 1) || 1;
+            const priceValue = parseMoney(item.priceValue || item.price || 0);
+            return {
+                id: String(item.id || item.rootId || "").trim(),
+                rootId: String(item.id || item.rootId || "").trim(),
+                code: String(item.code || "").trim(),
+                name: String(item.name || "San pham").trim(),
+                qty: quantity,
+                price: priceValue,
+                unit: String(item.unit || "").trim(),
+                img: String(item.img || "").trim(),
+                discount: 0,
+                discountType: "%",
+                variantInfo: String(item.variantInfo || "").trim()
+            };
+        });
+
+        const nextInfo = Object.assign({}, rawInfo, {
+            id: String(rawInfo.id || orderId || "").trim(),
+            last_update: lastUpdateText,
+            note: safeNote || rawInfo.note || "Don hang tu web",
+            status: 1,
+            customer_id: customerId,
+            customer_name: safeName,
+            customer_auth_uid: authUser.uid,
+            owner_uid: authUser.uid,
+            phone: safePhone,
+            subtotal: subtotal,
+            discount: discountValue,
+            discount_value: discountValue,
+            discount_percent: discountPercent,
+            shipping_fee: Number(data.shippingFee || rawInfo.shipping_fee || 0) || 0,
+            shipping_payer: String(data.shippingPayer || rawInfo.shipping_payer || "shop").trim(),
+            vat_rate: Number(data.vatRate || rawInfo.vat_rate || 0) || 0,
+            total_amount: finalAmount,
+            paid_amount: paidAmount,
+            debt: debtAmount,
+            debt_before: Math.max((Number((profile && profile.totalDebt) || 0) || 0) - previousDebt, 0),
+            debt_after: Math.max((Number((profile && profile.totalDebt) || 0) || 0) - previousDebt, 0) + debtAmount,
+            shipping_info: safeAddress,
+            payment_method: String(data.paymentMethod || rawInfo.payment_method || "pending").trim(),
+            price_type: String(data.priceType || rawInfo.price_type || "gia_si_web").trim(),
+            sort_ts: Number(rawInfo.sort_ts || 0) || Number(rawInfo.ts || 0) || sortTs
+        });
+        const nextDetail = {
+            items: items,
+            note: safeNote || rawDetail.note || "Don dat tu web"
+        };
+
+        const previousPendingMap = buildPendingReservationMap(Array.isArray(rawDetail.items) ? rawDetail.items : []);
+        const nextPendingMap = buildPendingReservationMap(items);
+        const deltaMap = {};
+        Object.keys(Object.assign({}, previousPendingMap, nextPendingMap)).forEach(function (productId) {
+            const previousQty = Number(previousPendingMap[productId] || 0) || 0;
+            const nextQty = Number(nextPendingMap[productId] || 0) || 0;
+            const delta = nextQty - previousQty;
+            if (delta !== 0) deltaMap[productId] = delta;
+        });
+
+        try {
+            if (!hasFirebaseSnapshot) throw new Error("order-write-fallback");
+            await orderBaseRef.child("in4").set(minifyData(nextInfo));
+            await orderBaseRef.child("ch_t").set(minifyData(nextDetail));
+            await writeOrderSummaryMirror_(authUser.uid, orderId, nextInfo);
+            await touchOrdersMetaTimestamp_(sortTs);
+            await syncPendingReservationDelta(deltaMap, sortTs, hasCatalogAccess);
+            applyPendingReservationDeltaToCatalog(deltaMap, sortTs);
+        } catch (error) {
+            if (!isPermissionDeniedError_(error) && String((error && error.message) || "") !== "order-write-fallback") {
+                throw error;
+            }
+            await postOrderViaGasBackend_(Object.assign({}, nextInfo, {
+                items: items,
+                note: nextDetail.note
+            }));
+            applyPendingReservationDeltaToCatalog(deltaMap, sortTs);
+            writeStorage(STORAGE_KEYS.customerId, customerId);
+            const fallbackResult = buildOrderResult_(orderId, nextInfo, nextDetail, {
+                persisted: false,
+                storageMode: "gas-fallback",
+                ownerUid: authUser.uid,
+                customerAuthUid: authUser.uid
+            });
+            saveMergedOrderSummary_(authUser.uid, fallbackResult.summary);
+            return fallbackResult;
+        }
+
+        writeStorage(STORAGE_KEYS.customerId, customerId);
+
+        try {
+            await service.persistCustomerProfile({
+                customerId: customerId,
+                authUid: authUser.uid,
+                name: safeName,
+                phone: String((profile && profile.phone) || safePhone).trim(),
+                shippingPhone: safePhone,
+                email: safeEmail,
+                address: safeAddress,
+                addresses: ensureAddressList((profile && profile.addresses) || [], safeAddress, customerId, safePhone),
+                totalOrders: Number((profile && profile.totalOrders) || 0) || 0,
+                totalBuy: Math.max(0, (Number((profile && profile.totalBuy) || 0) || 0) - previousFinalAmount + finalAmount),
+                totalDebt: Math.max(0, (Number((profile && profile.totalDebt) || 0) || 0) - previousDebt + debtAmount),
+                paidDebt: Number((profile && profile.paidDebt) || 0) || 0,
+                payments: Array.isArray(profile && profile.payments) ? profile.payments : [],
+                updatedTs: sortTs
+            }, {
+                authUser: authUser,
+                updatedTs: sortTs,
+                includeSecurity: !(profile && profile.customerId)
+            });
+        } catch (error) {
+            console.warn("Customer profile sync after order update failed:", error);
+        }
+
+        const successResult = buildOrderResult_(orderId, nextInfo, nextDetail, {
+            persisted: true,
+            storageMode: "firebase",
+            ownerUid: authUser.uid,
+            customerAuthUid: authUser.uid
+        });
+        saveMergedOrderSummary_(authUser.uid, successResult.summary);
+        return successResult;
+    };
+
     service.submitOrder = async function (payload) {
         const data = payload || {};
         await service.ensureReady();
         const authUser = await service.ensureCheckoutAuthUser();
-        if (!authUser) throw new Error("not-authenticated");
+        if (!authUser) {
+            return submitGuestOrderViaGas_(data);
+        }
         const hasCatalogAccess = await service.ensureCatalogAccess().catch(function () {
             return false;
         });
@@ -1836,6 +3529,8 @@
         const orderBaseRef = service.getPrimaryDb().ref("donhang/" + authUser.uid + "/" + orderId);
         await orderBaseRef.child("in4").set(minifyData(orderInfo));
         await orderBaseRef.child("ch_t").set(minifyData(orderDetail));
+        await writeOrderSummaryMirror_(authUser.uid, orderId, orderInfo);
+        await touchOrdersMetaTimestamp_(sortTs);
 
         const summary = normalizeOrderSummary(orderId, {
             in4: minifyData(orderInfo),
@@ -1867,7 +3562,9 @@
         const data = payload || {};
         await service.ensureReady();
         const authUser = await service.ensureCheckoutAuthUser();
-        if (!authUser) throw new Error("not-authenticated");
+        if (!authUser) {
+            return submitGuestOrderViaGas_(data);
+        }
         const hasCatalogAccess = await service.ensureCatalogAccess().catch(function () {
             return false;
         });
@@ -1880,12 +3577,28 @@
         }
 
         if (!profile) {
-            profile = await service.ensureCustomerProfile({
-                name: data.customerName || authUser.displayName || "",
-                email: data.email || authUser.email || "",
-                phone: data.phone || "",
-                address: data.address || ""
-            });
+            try {
+                profile = await service.ensureCustomerProfile({
+                    name: data.customerName || authUser.displayName || "",
+                    email: data.email || authUser.email || "",
+                    phone: data.phone || "",
+                    address: data.address || ""
+                });
+            } catch (error) {
+                if (!isPermissionDeniedError_(error)) throw error;
+                profile = buildLocalFallbackProfile({
+                    customerId: readStorage(STORAGE_KEYS.customerId, "") || ("KHW" + String(Date.now()).slice(-9)),
+                    authUid: authUser.uid,
+                    name: data.customerName || authUser.displayName || "",
+                    email: data.email || authUser.email || buildFallbackEmail(data.phone || "", authUser),
+                    phone: data.phone || "",
+                    shippingPhone: data.phone || "",
+                    address: data.address || "",
+                    addresses: ensureAddressList([], data.address || "", "", data.phone || ""),
+                    updatedTs: Date.now()
+                }, authUser);
+                service.saveCachedCustomer(profile);
+            }
         }
 
         const rawItems = Array.isArray(data.items) ? data.items : [];
@@ -1966,42 +3679,53 @@
             note: safeNote || "Don dat tu web"
         };
 
-        const orderBaseRef = service.getPrimaryDb().ref("donhang/" + authUser.uid + "/" + orderId);
-        await orderBaseRef.child("in4").set(minifyData(orderInfo));
-        await orderBaseRef.child("ch_t").set(minifyData(orderDetail));
-        await Promise.all(items.map(async function (item) {
-            const productId = String(item.rootId || item.id || "").trim();
-            const qty = Math.max(Number(item.qty || 1) || 0, 0);
-            if (!productId || !qty) return null;
+        let persisted = true;
+        try {
+            const orderBaseRef = service.getPrimaryDb().ref("donhang/" + authUser.uid + "/" + orderId);
+            await orderBaseRef.child("in4").set(minifyData(orderInfo));
+            await orderBaseRef.child("ch_t").set(minifyData(orderDetail));
+            await writeOrderSummaryMirror_(authUser.uid, orderId, orderInfo);
+            await Promise.all(items.map(async function (item) {
+                const productId = String(item.rootId || item.id || "").trim();
+                const qty = Math.max(Number(item.qty || 1) || 0, 0);
+                if (!productId || !qty) return null;
 
-            const dbCandidates = [];
-            if (hasCatalogAccess && service.getCatalogDb()) dbCandidates.push(service.getCatalogDb());
-            if (service.getPrimaryDb() && dbCandidates.indexOf(service.getPrimaryDb()) === -1) {
-                dbCandidates.push(service.getPrimaryDb());
-            }
-
-            let lastError = null;
-            for (let index = 0; index < dbCandidates.length; index += 1) {
-                const db = dbCandidates[index];
-                if (!db || typeof db.ref !== "function") continue;
-                try {
-                    const txResult = await db.ref("sanpham/" + productId + "/co_kh").transaction(function (currentData) {
-                        const nextData = currentData && typeof currentData === "object" ? Object.assign({}, currentData) : {};
-                        nextData.dd = (Number(nextData.dd || 0) || 0) + qty;
-                        nextData.updated_ts = Math.max(Number(nextData.updated_ts || 0) || 0, sortTs);
-                        return nextData;
-                    });
-                    if (txResult && txResult.committed !== false) return txResult;
-                } catch (error) {
-                    lastError = error;
+                const dbCandidates = [];
+                if (hasCatalogAccess && service.getCatalogDb()) dbCandidates.push(service.getCatalogDb());
+                if (service.getPrimaryDb() && dbCandidates.indexOf(service.getPrimaryDb()) === -1) {
+                    dbCandidates.push(service.getPrimaryDb());
                 }
-            }
 
-            if (lastError) {
-                console.warn("Khong tang duoc dang_dat cho san pham:", productId, lastError);
-            }
-            return null;
-        }));
+                let lastError = null;
+                for (let index = 0; index < dbCandidates.length; index += 1) {
+                    const db = dbCandidates[index];
+                    if (!db || typeof db.ref !== "function") continue;
+                    try {
+                        const txResult = await db.ref("sanpham/" + productId + "/co_kh").transaction(function (currentData) {
+                            const nextData = currentData && typeof currentData === "object" ? Object.assign({}, currentData) : {};
+                            nextData.dd = (Number(nextData.dd || 0) || 0) + qty;
+                            nextData.updated_ts = Math.max(Number(nextData.updated_ts || 0) || 0, sortTs);
+                            return nextData;
+                        });
+                        if (txResult && txResult.committed !== false) return txResult;
+                    } catch (error) {
+                        lastError = error;
+                    }
+                }
+
+                if (lastError) {
+                    console.warn("Khong tang duoc dang_dat cho san pham:", productId, lastError);
+                }
+                return null;
+            }));
+        } catch (error) {
+            if (!isPermissionDeniedError_(error)) throw error;
+            persisted = false;
+            await postOrderViaGasBackend_(Object.assign({}, orderInfo, {
+                items: items,
+                note: orderDetail.note
+            }));
+        }
 
         writeStorage(STORAGE_KEYS.customerId, fallbackCustomerId);
         applyPendingReservationToCatalog(items, sortTs);
@@ -2031,30 +3755,14 @@
             console.warn("Customer profile sync after order failed:", error);
         }
 
-        const summary = normalizeOrderSummary(orderId, {
-            in4: minifyData(orderInfo),
-            ch_t: minifyData(orderDetail)
+        const result = buildOrderResult_(orderId, orderInfo, orderDetail, {
+            persisted: persisted,
+            storageMode: persisted ? "firebase" : "gas-fallback",
+            ownerUid: authUser.uid,
+            customerAuthUid: authUser.uid
         });
-        const cachedOrders = service.getCachedOrders();
-        const nextOrders = cachedOrders && Array.isArray(cachedOrders.orders)
-            ? cachedOrders.orders.filter(function (order) { return String((order && order.id) || "") !== orderId; })
-            : [];
-        nextOrders.unshift(summary);
-        nextOrders.sort(function (a, b) {
-            return (Number(b.sortTs || 0) || 0) - (Number(a.sortTs || 0) || 0);
-        });
-        service.saveCachedOrders(authUser.uid, nextOrders);
-
-        return {
-            id: orderId,
-            summary: summary,
-            detail: {
-                id: orderId,
-                ownerUid: authUser.uid,
-                note: orderDetail.note,
-                items: items.map(function (item) { return normalizeOrderItem(item); })
-            }
-        };
+        saveMergedOrderSummary_(authUser.uid, result.summary);
+        return result;
     };
 
     service.buildPhoneAlias = buildPhoneAlias;

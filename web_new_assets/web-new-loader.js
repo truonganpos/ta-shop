@@ -29,12 +29,19 @@
         { key: 'firebase', file: 'firebase.js' },
         { key: 'ui-pc', file: 'ui-pc.js' },
         { key: 'auth-product-gate', file: 'auth-product-gate.js', optional: true },
-        { key: 'app-core', file: 'app-core.js' },
+        { key: 'app-core-foundation', file: 'app-core-foundation.js' },
+        { key: 'app-core-runtime', file: 'app-core-runtime.js' },
+        { key: 'app-core-ui', file: 'app-core-ui.js' },
         { key: 'cart-logic', file: 'cart-logic.js' },
+        { key: 'category-menu-feature', file: 'category-menu.feature.js' },
+        { key: 'home-tab-ui', file: 'home-tab-ui.js' },
+        { key: 'products-tab-ui', file: 'products-tab-ui.js' },
         { key: 'home-tab', file: 'home-tab.js' },
         { key: 'products-tab', file: 'products-tab.js' },
         { key: 'sale-tab', file: 'sale-tab.js' },
         { key: 'account-tab', file: 'account-tab.js' },
+        { key: 'google-auth-runtime-fixes', file: 'google-auth-runtime-fixes.js' },
+        { key: 'intro-tab-feature', file: 'intro-tab.feature.js' },
         { key: 'intro-experience', file: 'intro-experience.js' }
     ];
 

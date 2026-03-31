@@ -1,25 +1,49 @@
-﻿(function () {
+(function () {
     function getBridge() {
         return window.webNewAppBridge || {};
     }
 
-    function escapeHtml(value) {
-        return String(value || "")
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#39;");
-    }
+    var homeBannerSlides = (window.HOME_BANNER_SLIDES || [
+        {
+            image: "https://images.unsplash.com/photo-1596461404969-9ae70f2830c1?auto=format&fit=crop&w=1600&q=80",
+            badge: "Trường An Store",
+            title: "Thế giới niềm vui bé",
+            subtitle: "Khơi dậy tiềm năng với hàng ngàn đồ chơi giáo dục an toàn.",
+            support: "Đồ chơi • Mẹ bé • Giá sỉ rõ ràng"
+        },
+        {
+            image: "https://images.unsplash.com/photo-1585366119957-e9730b6d0f60?auto=format&fit=crop&w=1600&q=80",
+            badge: "Góc đồ chơi",
+            title: "Đồ chơi sáng tạo cho bé mỗi ngày",
+            subtitle: "Danh mục rõ ràng theo nhóm hàng và tag để khách tìm nhanh hơn.",
+            support: "Lọc nhanh • Xem đẹp trên mobile và desktop"
+        },
+        {
+            image: "https://images.unsplash.com/photo-1559454403-b8fb88521f11?auto=format&fit=crop&w=1600&q=80",
+            badge: "Mẹ và bé",
+            title: "Sơ sinh, sữa bỉm và đồ dùng tiện chăm bé",
+            subtitle: "Gợi ý hàng bán nhanh, dễ chốt đơn và dễ tạo giỏ hàng lớn.",
+            support: "Giá tốt • Đồng bộ đơn hàng • Chăm sóc nhanh"
+        }
+    ]).map(function (slide) {
+        return Object.assign({}, slide || {});
+    });
 
-    var homeBannerSlides = window.HOME_BANNER_SLIDES || [
-        // Hướng dẫn chèn link ảnh:
-        // 1. Thay giá trị "image" bên dưới bằng link ảnh của bạn.
-        // 2. Nên dùng ảnh ngang tỷ lệ 16:9 hoặc 21:9 để slide hiển thị đẹp hơn.
-        // 3. Có thể thêm hoặc xóa slide bằng cách chỉnh mảng này.
-        { image: "https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?auto=format&fit=crop&w=1400&q=80" },
-        { image: "https://images.unsplash.com/photo-1544126592-807ade215a0b?auto=format&fit=crop&w=1400&q=80" },
-        { image: "https://images.unsplash.com/photo-1516627145497-ae6968895b74?auto=format&fit=crop&w=1400&q=80" }
+    var homeHighlightCards = window.HOME_HIGHLIGHT_CARDS || [
+        {
+            image: "https://images.unsplash.com/photo-1519689680058-324335c77eba?auto=format&fit=crop&w=1200&q=80",
+            label: "Đồ sơ sinh",
+            accentClass: "text-blue-600",
+            iconSvg: "<svg class='w-5 h-5 soft-icon' fill='none' stroke='currentColor' viewBox='0 0 24 24'><path d='M12 2v20'></path><path d='M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6'></path></svg>",
+            action: "goToTab('tab-products')"
+        },
+        {
+            image: "https://images.unsplash.com/photo-1581557991964-125469da3b8a?auto=format&fit=crop&w=1200&q=80",
+            label: "Đồ chơi mộc",
+            accentClass: "text-violet-600",
+            iconSvg: "<svg class='w-5 h-5 soft-icon' fill='none' stroke='currentColor' viewBox='0 0 24 24'><path d='M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8'></path><path d='M3 3v5h5'></path></svg>",
+            action: "goToTab('tab-products')"
+        }
     ];
 
     function updateHomeBannerContent() {
@@ -33,9 +57,9 @@
         if (!dots) return;
 
         dots.querySelectorAll("button").forEach(function (dot, index) {
-            dot.classList.toggle("bg-white", index === bannerIndex);
+            dot.classList.toggle("bg-babyPink", index === bannerIndex);
             dot.classList.toggle("scale-110", index === bannerIndex);
-            dot.classList.toggle("bg-white/50", index !== bannerIndex);
+            dot.classList.toggle("bg-white/60", index !== bannerIndex);
         });
     }
 
@@ -44,20 +68,20 @@
         var track = document.getElementById("home-banner-track");
         var dots = document.getElementById("home-banner-dots");
         if (!track || !dots) return;
+        var canAutoRotate = function () {
+            var homeTab = document.getElementById("tab-home");
+            return document.visibilityState === "visible" && !!(homeTab && homeTab.classList.contains("active"));
+        };
 
-        track.innerHTML = homeBannerSlides.map(function (slide, index) {
-            var imageUrl = bridge.getOptimizedImageUrl ? bridge.getOptimizedImageUrl(slide.image, "w1600") : slide.image;
-            return [
-                "<div class='w-full h-full shrink-0'>",
-                "    <img src='", imageUrl, "' class='w-full h-full object-cover' alt='Banner ", String(index + 1), "' loading='", index === 0 ? "eager" : "lazy", "' decoding='async' fetchpriority='", index === 0 ? "high" : "low", "'/>",
-                "</div>"
-            ].join("");
-        }).join("");
-
-        dots.innerHTML = homeBannerSlides.map(function (_, index) {
-            var activeIndex = bridge.getHomeBannerIndex ? bridge.getHomeBannerIndex() : 0;
-            return "<button class='w-2.5 h-2.5 rounded-full transition-all " + (index === activeIndex ? "bg-white scale-110" : "bg-white/50") + "' onclick='setHomeBanner(" + index + ")'></button>";
-        }).join("");
+        if (window.homeTabUi && typeof window.homeTabUi.renderBanner === "function") {
+            window.homeTabUi.renderBanner(
+                track,
+                dots,
+                homeBannerSlides,
+                bridge.getHomeBannerIndex ? bridge.getHomeBannerIndex() : 0,
+                bridge.getOptimizedImageUrl
+            );
+        }
 
         updateHomeBannerContent();
 
@@ -65,12 +89,20 @@
         if (timer) clearInterval(timer);
 
         var nextTimer = setInterval(function () {
+            if (!canAutoRotate()) return;
             var nextIndex = ((bridge.getHomeBannerIndex ? bridge.getHomeBannerIndex() : 0) + 1) % Math.max(homeBannerSlides.length, 1);
             if (bridge.setHomeBannerIndex) bridge.setHomeBannerIndex(nextIndex);
             updateHomeBannerContent();
         }, 4000);
 
         if (bridge.setHomeBannerTimer) bridge.setHomeBannerTimer(nextTimer);
+    }
+
+    function renderHomeHighlightGrid() {
+        var bridge = getBridge();
+        var container = document.getElementById("home-highlight-grid");
+        if (!container || !window.homeTabUi || typeof window.homeTabUi.renderHighlightGrid !== "function") return;
+        window.homeTabUi.renderHighlightGrid(container, homeHighlightCards, bridge.getOptimizedImageUrl);
     }
 
     window.setHomeBanner = function (index) {
@@ -81,77 +113,58 @@
 
     function renderHomeDesktopCategoryMenu() {
         var bridge = getBridge();
+        var menu = document.getElementById("home-desktop-category-menu");
+        if (!menu) return;
+
         var categories = bridge.getProductCategoryOptions ? bridge.getProductCategoryOptions() : [];
         var activeCategory = bridge.getFilterCategory ? bridge.getFilterCategory() : "";
+        var categoryUi = window.categoryMenuFeature || window.productsTabUi;
 
-        if (window.uiPc && typeof window.uiPc.renderSidebarMenu === "function") {
-            window.uiPc.renderSidebarMenu({
-                containerId: "home-desktop-category-menu",
-                counterId: "home-desktop-category-count",
+        if (categoryUi && typeof categoryUi.renderTreeMenu === "function") {
+            categoryUi.renderTreeMenu({
+                container: "home-desktop-category-menu",
+                counter: "home-desktop-category-count",
                 categories: categories,
                 activeCategory: activeCategory,
-                allLabel: "Tất cả",
+                allLabel: "Tất cả sản phẩm",
                 selectHandler: "filterHomeByCategory",
-                buildArgument: bridge.toInlineArgument
+                buildArgument: bridge.toInlineArgument,
+                variant: "home-desktop",
+                showHeader: false,
+                wrapShell: false,
+                showSummary: false,
+                heroAction: "goToTab('tab-products')",
+                heroActionLabel: "Mở tab sản phẩm"
             });
-            return;
+        } else if (window.homeTabUi && typeof window.homeTabUi.renderDesktopCategoryFallback === "function") {
+            window.homeTabUi.renderDesktopCategoryFallback(
+                document.getElementById("home-desktop-category-menu"),
+                document.getElementById("home-desktop-category-count"),
+                categories,
+                activeCategory,
+                {
+                    selectHandler: "filterHomeByCategory",
+                    buildArgument: bridge.toInlineArgument
+                }
+            );
         }
-
-        var container = document.getElementById("home-desktop-category-menu");
-        var counter = document.getElementById("home-desktop-category-count");
-        if (!container) return;
-
-        if (counter) counter.innerText = Math.max(categories.length - 1, 0) + " nhóm";
-        container.innerHTML = categories.map(function (item) {
-            var active = (!activeCategory && item.name === "Tất cả") || activeCategory === item.name;
-            return [
-                "<button class='w-full flex items-center gap-3 rounded-2xl px-4 py-3 border text-left transition ",
-                active ? "border-babyPink bg-pink-50 text-babyPink shadow-sm [.dark-mode_&]:!bg-[#1f2937] [.dark-mode_&]:!border-[#334155] [.dark-mode_&]:!text-babyPink" : "border-transparent bg-white text-gray-600 hover:bg-gray-50 [.dark-mode_&]:!bg-transparent [.dark-mode_&]:hover:!bg-[#1f2937] [.dark-mode_&]:!text-gray-300",
-                "' onclick='filterHomeByCategory(",
-                bridge.toInlineArgument ? bridge.toInlineArgument(item.name === "Tất cả" ? "" : item.name) : "''",
-                ")'>",
-                "    <div class='w-11 h-11 rounded-2xl ", active ? "bg-white [.dark-mode_&]:!bg-[#0f172a]" : item.color, " flex items-center justify-center shrink-0'>",
-                "        <i class='fa-solid ", item.name === "Tất cả" ? "fa-border-all" : item.icon, "'></i>",
-                "    </div>",
-                "    <div class='min-w-0 flex-1 flex items-center justify-between gap-3'>",
-                "        <span class='font-bold truncate'>", escapeHtml(item.name), "</span>",
-                "        <span class='text-xs font-bold ", active ? "text-babyPink" : "text-gray-400", "'>", String(item.count || 0), "</span>",
-                "    </div>",
-                "</button>"
-            ].join("");
-        }).join("");
     }
 
     function renderHomeGuestCta() {
         var bridge = getBridge();
         var container = document.getElementById("home-guest-cta");
-        if (!container) return;
+        if (!container || !window.homeTabUi || typeof window.homeTabUi.renderGuestCta !== "function") return;
 
         var user = bridge.getCurrentUser ? bridge.getCurrentUser() : null;
         var isGuest = !(user && user.authUid);
-        container.classList.toggle("hidden", !isGuest);
-        if (!isGuest) {
-            container.innerHTML = "";
-            return;
-        }
-
         var gateMessage = window.webNewCatalogGate && typeof window.webNewCatalogGate.getBlockedMessage === "function"
             ? window.webNewCatalogGate.getBlockedMessage()
             : "Đăng nhập để đồng bộ giá và danh sách sản phẩm mới nhất.";
 
-        container.innerHTML = [
-            "<div class='flex flex-col md:flex-row md:items-center md:justify-between gap-4'>",
-            "    <div>",
-            "        <p class='text-[11px] uppercase tracking-[0.22em] text-babyPink font-black'>Khách chưa đăng nhập</p>",
-            "        <h3 class='font-extrabold text-xl text-gray-800 mt-1'>Đăng nhập để xem giá sỉ và đồng bộ đơn hàng</h3>",
-            "        <p class='text-sm text-gray-600 mt-2 leading-6 max-w-2xl'>", escapeHtml(gateMessage), "</p>",
-            "    </div>",
-            "    <div class='flex flex-wrap gap-3 shrink-0'>",
-            "        <button class='bg-babyPink text-white px-5 py-3 rounded-2xl font-bold shadow-md hover:bg-pink-500 transition' onclick='openAuthFromHome(\"login\")'>Đăng nhập</button>",
-            "        <button class='bg-white text-babyPink border border-pink-200 px-5 py-3 rounded-2xl font-bold hover:bg-pink-50 transition [.dark-mode_&]:!bg-[#1f2937] [.dark-mode_&]:!border-[#334155]' onclick='openAuthFromHome(\"register\")'>Đăng ký</button>",
-            "    </div>",
-            "</div>"
-        ].join("");
+        window.homeTabUi.renderGuestCta(container, {
+            isGuest: isGuest,
+            gateMessage: gateMessage
+        });
     }
 
     window.openAuthFromHome = function (mode) {
@@ -165,28 +178,24 @@
     };
 
     window.renderHomeCategories = function () {
+        var bridge = getBridge();
         var container = document.getElementById("home-mobile-categories");
-        if (!container) return;
-
-        container.innerHTML = [
-            "<div class='flex items-center justify-between rounded-[28px] border border-pink-100 bg-gradient-to-r from-rose-50 via-white to-pink-50 shadow-sm p-4 md:p-5 cursor-pointer hover:opacity-90 transition [.dark-mode_&]:!from-[#1e293b] [.dark-mode_&]:!via-[#0f172a] [.dark-mode_&]:!to-[#1e293b] [.dark-mode_&]:!border-[#334155]' onclick='goToTab(\"tab-products\"); setTimeout(function(){ if(typeof openProductCategoryPopup === \"function\") openProductCategoryPopup(); }, 100);'>",
-            "    <div class='flex items-center gap-4'>",
-            "        <div class='w-12 h-12 rounded-full bg-white text-babyPink flex items-center justify-center text-xl shadow-sm shrink-0 [.dark-mode_&]:!bg-[#0f172a]'><i class='fa-solid fa-layer-group'></i></div>",
-            "        <div>",
-            "            <h3 class='font-bold text-gray-800 text-base'>Khám phá danh mục</h3>",
-            "            <p class='text-xs text-gray-500 mt-0.5'>Mở menu nhóm hàng và tag sản phẩm</p>",
-            "        </div>",
-            "    </div>",
-            "    <div class='w-10 h-10 rounded-full bg-white text-gray-400 flex items-center justify-center shadow-sm shrink-0 [.dark-mode_&]:!bg-[#0f172a]'><i class='fa-solid fa-angle-right'></i></div>",
-            "</div>"
-        ].join("");
+        if (!container || !window.homeTabUi || typeof window.homeTabUi.renderMobileCategoriesShortcut !== "function") return;
+        window.homeTabUi.renderMobileCategoriesShortcut(container, {
+            categories: bridge.getProductCategoryOptions ? bridge.getProductCategoryOptions() : [],
+            activeCategory: bridge.getFilterCategory ? bridge.getFilterCategory() : "",
+            selectHandler: "filterHomeByCategory",
+            buildArgument: bridge.toInlineArgument,
+            ctaAction: "goToTab('tab-products')",
+            ctaLabel: "Mở sản phẩm"
+        });
     };
 
     window.filterHomeByCategory = function (categoryName) {
         var bridge = getBridge();
         var currentCategory = bridge.getFilterCategory ? bridge.getFilterCategory() : "";
 
-        if ((bridge.isAllCategory && bridge.isAllCategory(categoryName)) || currentCategory === categoryName) {
+        if (!categoryName || currentCategory === categoryName) {
             if (bridge.setFilterCategory) bridge.setFilterCategory("");
         } else if (bridge.setFilterCategory) {
             bridge.setFilterCategory(categoryName);
@@ -194,7 +203,6 @@
 
         if (bridge.updateProductsCategoryButton) bridge.updateProductsCategoryButton();
         if (typeof window.renderProductsFilterSummary === "function") window.renderProductsFilterSummary();
-        renderHomeDesktopCategoryMenu();
 
         var filtered = bridge.getFilteredProducts ? bridge.getFilteredProducts(bridge.getShopProducts ? bridge.getShopProducts() : []) : [];
         window.renderHomeProductLists(filtered);
@@ -204,23 +212,35 @@
         var bridge = getBridge();
         var renderList = bridge.renderProductsList || window.renderProductsList;
         if (typeof renderList !== "function") return;
-        renderList(products, "product-container", products);
-        renderList(products, "product-container-desktop", products);
+        var safeProducts = Array.isArray(products) ? products.slice() : [];
+        var safeUser = bridge.getCurrentUser ? bridge.getCurrentUser() : null;
+        var hasCategoryFilter = !!(bridge.getFilterCategory && bridge.getFilterCategory());
+        var recommendedProducts = (!hasCategoryFilter && safeUser && bridge.getRecommendedProductsForUser)
+            ? bridge.getRecommendedProductsForUser(safeProducts, safeUser)
+            : safeProducts;
+        if (typeof window.updateHomeProductTitles === "function") {
+            window.updateHomeProductTitles(!hasCategoryFilter && safeUser ? "Gợi ý phù hợp cho bạn" : "Sản phẩm đề xuất");
+        }
+        renderList(recommendedProducts, "product-container", recommendedProducts);
+        renderList(recommendedProducts, "product-container-desktop", recommendedProducts);
     };
 
     window.updateHomeProductTitles = function (title) {
         ["home-products-title", "home-products-title-desktop"].forEach(function (id) {
             var element = document.getElementById(id);
-            if (element) element.innerText = title;
+            if (element) {
+                var textContainer = element.querySelector("span:last-child");
+                if (textContainer) textContainer.innerText = title;
+                else element.innerText = title;
+            }
         });
     };
 
     function render() {
         var bridge = getBridge();
         renderHomeBannerSlider();
+        renderHomeHighlightGrid();
         renderHomeGuestCta();
-        renderHomeDesktopCategoryMenu();
-        window.renderHomeCategories();
         var filteredProducts = bridge.getFilteredProducts ? bridge.getFilteredProducts(bridge.getShopProducts ? bridge.getShopProducts() : []) : [];
         window.renderHomeProductLists(filteredProducts);
     }

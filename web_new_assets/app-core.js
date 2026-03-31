@@ -300,11 +300,34 @@
         return match ? match[0] : value;
     };
     const normalizeDriveImageInput = (rawInput) => {
+        const raw = String(rawInput || '').replace(/\r/g, '').trim();
+        if(!raw) return [];
+        const tokens = [];
+        const urlStartRegex = /(https?:\/\/|data:image\/)/ig;
+        const urlStarts = [];
+        let match;
+        while((match = urlStartRegex.exec(raw))) urlStarts.push(match.index);
+        const pushSimpleParts = (segment) => {
+            String(segment || '')
+                .split(/[,\n]+/)
+                .map(item => String(item || '').trim())
+                .filter(Boolean)
+                .forEach(item => tokens.push(item));
+        };
+        if(!urlStarts.length) pushSimpleParts(raw);
+        else {
+            if(urlStarts[0] > 0) pushSimpleParts(raw.slice(0, urlStarts[0]));
+            urlStarts.forEach((startIndex, index) => {
+                const endIndex = index + 1 < urlStarts.length ? urlStarts[index + 1] : raw.length;
+                let segment = raw.slice(startIndex, endIndex).trim();
+                segment = segment.replace(/[\s,]+$/, '').trim();
+                if(segment) tokens.push(segment);
+            });
+        }
         const seen = new Set();
-        return String(rawInput || '')
-            .split(/[\n,]+/)
+        return tokens
             .map(item => extractDriveId(item))
-            .map(item => String(item || '').trim())
+            .map(item => String(item || '').trim().replace(/#(?:.*?&)?tasmeta=[^&]+.*$/i, '').replace(/#$/, ''))
             .filter(Boolean)
             .filter(item => {
                 if(seen.has(item)) return false;
@@ -312,10 +335,37 @@
                 return true;
             });
     };
+    const decodeHostedImageMeta = (rawUrl = '') => {
+        const value = String(rawUrl || '').trim();
+        if(!value) return null;
+        const match = value.match(/#(?:.*?&)?tasmeta=([^&]+)/i);
+        if(!match || !match[1]) return null;
+        try {
+            let encoded = String(match[1] || '').trim().replace(/-/g, '+').replace(/_/g, '/');
+            while(encoded.length % 4) encoded += '=';
+            return JSON.parse(decodeURIComponent(escape(atob(encoded))));
+        } catch(error) {
+            return null;
+        }
+    };
+    const getPrimaryHostedImageMeta = (images = []) => {
+        for(const image of (Array.isArray(images) ? images : [])) {
+            const meta = decodeHostedImageMeta(image);
+            if(meta && typeof meta === 'object') return meta;
+        }
+        return null;
+    };
     const getOptimizedImageUrl = (raw, size = 'w800') => {
         const value = String(raw || '').trim();
         if(!value) return 'https://via.placeholder.com/600x600?text=No+Image';
         if(value.startsWith('data:image')) return value;
+        if(/^https?:\/\/res\.cloudinary\.com\//i.test(value) && value.includes('/image/upload/')) {
+            const widthMatch = String(size || '').match(/w(\d+)/i);
+            const width = widthMatch && widthMatch[1] ? Number(widthMatch[1]) || 0 : 0;
+            const transforms = ['f_auto', 'q_auto'];
+            if(width > 0) transforms.push(`w_${width}`, 'c_limit');
+            return value.replace('/image/upload/', `/image/upload/${transforms.join(',')}/`);
+        }
         if(/^https?:\/\//i.test(value) && !value.includes('drive.google.com') && !value.includes('docs.google.com')) return value;
         const driveId = extractDriveId(value);
         if(/^https?:\/\//i.test(driveId)) return driveId;
@@ -324,12 +374,58 @@
     const normalizeKeyword = (value = '') => String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const isAllCategory = (value = '') => normalizeKeyword(value) === 'tat ca';
     const getProductCode = (product) => String((product && (product.code || product.sku || product.id)) || '').trim();
-    const getProductGroupName = (product) => String((product && (product.group || product.cat)) || '').trim();
+    const parseCategoryList = (value) => {
+        const queue = [];
+        const pushValue = (item) => {
+            if (Array.isArray(item)) {
+                item.forEach(pushValue);
+                return;
+            }
+            if (item && typeof item === 'object') {
+                Object.keys(item).forEach((key) => pushValue(item[key]));
+                return;
+            }
+            queue.push(item);
+        };
+
+        pushValue(value);
+
+        const seen = new Set();
+        return queue
+            .flatMap((item) => String(item || '').split(/[,;|\n]+/))
+            .map((item) => String(item || '').trim())
+            .filter(Boolean)
+            .filter((item) => {
+                const key = normalizeKeyword(item);
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+    };
+    const getProductGroupNames = (product) => {
+        const groups = parseCategoryList([
+            product && product.group,
+            product && product.groups,
+            product && product.groupList,
+            product && product.categoryGroups
+        ]);
+        return groups;
+    };
+    const getProductGroupName = (product) => String(getProductGroupNames(product)[0] || '').trim();
+    const getProductExplicitTags = (product) => {
+        const groupKeys = new Set(getProductGroupNames(product).map((item) => normalizeKeyword(item)));
+        return parseCategoryList([
+            product && product.tags,
+            product && product.tagList,
+            product && product.childTags,
+            product && product.subTags
+        ]).filter((tag) => !groupKeys.has(normalizeKeyword(tag)));
+    };
     const getProductDisplayName = (product) => {
         const code = getProductCode(product);
         const name = String((product && product.name) || '').trim();
         if(code && name && normalizeKeyword(name).startsWith(normalizeKeyword(code))) return name;
-        if(code && name) return `${code} - ${name}`;
+        if(code && name) return `${code} ${name}`;
         return name || code || 'Sản phẩm';
     };
     const getProductUnit = (product) => String((product && (product.unit || product.dvt || product.don_vi || product.don_vi_tinh)) || '').trim();
@@ -344,17 +440,29 @@
         return unit ? `${price} / ${unit}` : price;
     };
     const getProductVisibleTags = (product) => {
-        const group = getProductGroupName(product);
-        const tags = (Array.isArray(product && product.tags) ? product.tags : [])
-            .map(item => String(item || '').trim())
-            .filter(Boolean)
-            .filter(tag => tag !== group);
-        return [...new Set(tags.length ? tags : (group ? [group] : []))];
+        return getProductExplicitTags(product);
     };
     const getProductTagText = (product) => {
         const tags = getProductVisibleTags(product);
-        if(!tags.length) return 'Tag: Sản phẩm';
-        return `Tag: ${tags.slice(0, 2).join(' • ')}`;
+        if(tags.length) return `Tag: ${tags.slice(0, 2).join(' • ')}`;
+        const groups = getProductGroupNames(product);
+        if(groups.length) return `Nhóm: ${groups.slice(0, 2).join(' • ')}`;
+        return 'Tag: Sản phẩm';
+    };
+    const buildProductMetaDesc = (rawDesc, group, tags) => {
+        const safeGroup = String(group || '').trim();
+        const safeTags = [...new Set((Array.isArray(tags) ? tags : [])
+            .map(item => String(item || '').trim())
+            .filter(Boolean)
+            .filter(tag => tag !== safeGroup))];
+        const parts = [];
+        if(safeGroup) parts.push(`Nhóm: ${safeGroup}`);
+        if(safeTags.length) parts.push(`Tag: ${safeTags.slice(0, 4).join(' • ')}`);
+        parts.push('Kho: Trường An');
+        const fallbackDesc = parts.join(' | ');
+        const safeDesc = String(rawDesc || '').trim();
+        if(!safeDesc) return fallbackDesc;
+        return /kho\s*:/i.test(safeDesc) ? fallbackDesc : safeDesc;
     };
     const getProductVariantSummary = (product) => {
         const variants = Array.isArray(product && product.variants) ? product.variants : [];
@@ -368,18 +476,16 @@
         const parts = [
             getProductCode(product),
             product && product.name,
-            getProductGroupName(product),
-            ...(Array.isArray(product && product.tags) ? product.tags : []),
+            ...getProductGroupNames(product),
+            ...getProductExplicitTags(product),
             product && product.desc
         ];
         return normalizeKeyword(parts.filter(Boolean).join(' '));
     };
     const getProductCategoryNames = (product) => {
-        const group = getProductGroupName(product);
-        const tagList = Array.isArray(product && product.tags)
-            ? product.tags
-            : String((product && product.tags) || '').split(/[,;|\n]+/);
-        const values = [group, ...tagList, String((product && product.cat) || '').trim()]
+        const groups = getProductGroupNames(product);
+        const tagList = getProductExplicitTags(product);
+        const values = [...groups, ...tagList]
             .map(item => String(item || '').trim())
             .filter(Boolean);
         return [...new Set(values)];
@@ -392,10 +498,10 @@
         const signal = normalizeKeyword([
             name,
             ...getRelatedProductsForCategory(name).flatMap((product) => [
-                getProductGroupName(product),
+                ...getProductGroupNames(product),
                 product && product.name,
                 product && product.desc,
-                ...(Array.isArray(product && product.tags) ? product.tags : [])
+                ...getProductExplicitTags(product)
             ])
         ].filter(Boolean).join(' '));
         let bestRule = CATEGORY_ICON_RULES[0];
@@ -414,13 +520,11 @@
         return getProductCategoryNames(product).includes(categoryName);
     };
     const getDynamicCategoryNames = () => {
-        const groups = [...new Set((shopProducts || []).map(product => getProductGroupName(product)).filter(Boolean))];
+        const groups = [...new Set((shopProducts || []).flatMap(product => getProductGroupNames(product)).filter(Boolean))];
+        const groupKeys = new Set(groups.map((item) => normalizeKeyword(item)));
         const tags = [...new Set((shopProducts || []).flatMap(product => {
-            const list = Array.isArray(product && product.tags)
-                ? product.tags
-                : String((product && product.tags) || '').split(/[,;|\n]+/);
-            return list.map(item => String(item || '').trim()).filter(Boolean);
-        }).filter(name => !groups.includes(name)))];
+            return getProductExplicitTags(product);
+        }).filter(name => !groupKeys.has(normalizeKeyword(name))))];
         return ['Tất cả', ...groups, ...tags];
     };
     const mapPosBadges = (posProduct) => {
@@ -450,14 +554,17 @@
                     ? variant.values
                     : String((variant && (variant.options || variant.values || variant.value)) || '').split(/[,;|\n]+/));
             const options = optionSource.map((item) => String(item || '').trim()).filter(Boolean);
+            const variantImage = String((variant && (variant.image || variant.link_anh || variant.img)) || '').trim();
             return {
                 name: variant.name || variant.label || 'Phân loại',
-                options
+                options,
+                image: variantImage
             };
         }).filter((variant) => variant.options.length > 0);
     };
     const mapPosProductToAppProduct = (posProduct, index = 0) => {
         const images = normalizeDriveImageInput(posProduct.link_anh || posProduct.Image || posProduct.image || posProduct.img || '');
+        const primaryImageMeta = getPrimaryHostedImageMeta(images);
         const wholesalePrice = parseMoney(posProduct.gia_si || posProduct.WholesalePrice || 0);
         const retailPrice = parseMoney(posProduct.gia_ban_le || posProduct.Price || posProduct.price || 0);
         const basePrice = wholesalePrice || retailPrice || 0;
@@ -467,21 +574,24 @@
         const pendingStock = Number(posProduct.dang_dat || posProduct.dd || posProduct.pending_stock || 0) || 0;
         const availableStock = Math.max(stock - pendingStock, 0);
         const sold = Number(posProduct.total_buy || posProduct.sold || 0) || 0;
-        const group = String(posProduct.group || posProduct.Group || '').trim();
+        const groups = parseCategoryList([posProduct.group, posProduct.Group, posProduct.groups, posProduct.Groups].flat());
+        const group = String(groups[0] || posProduct.group || posProduct.Group || '').trim();
         const code = String(posProduct.ma_sp || posProduct.code || posProduct.Code || posProduct.sku || posProduct.SKU || posProduct.id || posProduct.ID || `POS_${index + 1}`).trim();
         const updatedTs = Number(posProduct.updated_ts || posProduct.updatedAt || posProduct.UpdatedTs || 0) || 0;
         const firstImage = images[0] ? getOptimizedImageUrl(images[0], 'w800') : 'https://via.placeholder.com/600x600?text=Product';
         const variants = mapPosVariants(posProduct);
         const unit = String(posProduct.dvt || posProduct.unit || posProduct.don_vi || posProduct.don_vi_tinh || posProduct['Don vi tinh'] || posProduct['Đơn vị tính'] || '').trim();
+        const groupKeys = new Set(groups.map((item) => normalizeKeyword(item)));
         const tags = [...new Set([
-            ...String(posProduct.tags || posProduct.Tags || '').split(/[,;|\n]+/).map(item => item.trim()),
-            group
-        ].filter(Boolean))];
+            ...parseCategoryList(posProduct.tags || posProduct.Tags || ''),
+            ...(Array.isArray(primaryImageMeta && primaryImageMeta.t) ? primaryImageMeta.t : [])
+        ].filter(item => item && !groupKeys.has(normalizeKeyword(item))))];
         const primaryCategory = group || tags[0] || 'Sản phẩm';
         return {
             id: String(posProduct.id || posProduct.ID || code || `POS_${index + 1}`),
             code,
             group,
+            groups,
             unit,
             cat: primaryCategory,
             tags,
@@ -491,7 +601,7 @@
             sold,
             images: images.length ? images.map(item => getOptimizedImageUrl(item, 'w1200')) : [firstImage],
             img: firstImage,
-            desc: String(posProduct.mo_ta || posProduct.description || posProduct.desc || `${primaryCategory} | Kho: ${posProduct.kho || posProduct.Kho || 'Mặc định'}`),
+            desc: buildProductMetaDesc(posProduct.mo_ta || posProduct.description || posProduct.desc || (primaryImageMeta && primaryImageMeta.d) || '', group || primaryCategory, tags),
             variants,
             inStock: availableStock > 0,
             badges: mapPosBadges(posProduct),
@@ -590,7 +700,7 @@
                 const message = String((error && (error.code || error.message)) || '').toLowerCase();
                 shopProducts = [];
                 productFeedState.error = message.includes('permission_denied')
-                    ? 'Không đọc được danh sách sản phẩm từ Firebase. Hãy kiểm tra catalog_public hoặc anonymous auth.'
+                    ? 'Không đọc được danh sách sản phẩm từ Firebase. Hãy kiểm tra catalog_public, router shard 1 và chạy Đồng bộ ép buộc từ POS.'
                     : 'Lỗi tải sản phẩm từ Firebase.';
                 refreshCatalogViews();
                 return false;
@@ -626,7 +736,7 @@
             if(!shopProducts.length) {
                 const message = String((error && (error.code || error.message)) || '').toLowerCase();
                 productFeedState.error = message.includes('permission_denied')
-                    ? 'Không đọc được danh sách sản phẩm từ Firebase. Hãy kiểm tra catalog_public hoặc anonymous auth.'
+                    ? 'Không đọc được danh sách sản phẩm từ Firebase. Hãy kiểm tra catalog_public, router shard 1 và chạy Đồng bộ ép buộc từ POS.'
                     : 'Lỗi tải sản phẩm từ Firebase.';
                 refreshCatalogViews();
             }
@@ -661,7 +771,7 @@
     };
     const mergeOrdersById = (localOrders = [], cloudOrders = []) => {
         const mergedMap = {};
-        [...cloudOrders, ...localOrders].forEach((order) => {
+        [...localOrders, ...cloudOrders].forEach((order) => {
             if(!order || !order.id) return;
             mergedMap[order.id] = {
                 ...(mergedMap[order.id] || {}),
@@ -782,7 +892,8 @@
     };
     const renderProductBadges = (product) => {
         const badges = product && Array.isArray(product.badges) ? product.badges : [];
-        if(!badges.length) return '';
+        const salePercent = getProductSalePercent(product);
+        if(!badges.length && salePercent <= 0) return '';
 
         const badgeStyles = {
             NEW: 'bg-emerald-500 text-white',
@@ -792,7 +903,16 @@
 
         return `
             <div class="absolute top-3 left-3 z-10 flex flex-col gap-1">
-                ${badges.map((badge) => `<span class="px-2.5 py-1 rounded-full text-[10px] font-extrabold tracking-[0.14em] shadow-sm ${badgeStyles[badge] || 'bg-gray-800 text-white'}">${badge}</span>`).join('')}
+                ${[
+                    ...(salePercent > 0 ? [{
+                        label: `-${salePercent}%`,
+                        className: 'bg-red-500 text-white'
+                    }] : []),
+                    ...badges.filter((badge) => badge !== 'SALE').map((badge) => ({
+                        label: badge,
+                        className: badgeStyles[badge] || 'bg-gray-800 text-white'
+                    }))
+                ].map((badge) => `<span class="px-2.5 py-1 rounded-full text-[10px] font-extrabold tracking-[0.14em] shadow-sm ${badge.className}">${badge.label}</span>`).join('')}
             </div>
         `;
     };
@@ -869,6 +989,8 @@
     };
     window.openOrderSuccessModal = (payload = {}) => {
         lastPlacedOrderMeta = payload;
+        const overlay = document.getElementById('order-success-overlay');
+        const panel = overlay ? overlay.querySelector('.modal-panel') : null;
         const msg = document.getElementById('order-success-message');
         const meta = document.getElementById('order-success-meta');
         const zaloButton = document.getElementById('order-success-zalo-btn');
@@ -887,8 +1009,29 @@
         }
         if(zaloButton) zaloButton.innerText = `Mở Zalo ${ORDER_SUPPORT_ZALO_PHONE}`;
         openModalShell('order-success-overlay');
+        if(overlay) {
+            overlay.style.opacity = '1';
+            overlay.style.pointerEvents = 'auto';
+            overlay.removeAttribute('aria-hidden');
+        }
+        if(panel) {
+            panel.style.opacity = '1';
+            panel.style.transform = 'translateY(0) scale(1)';
+        }
     };
-    window.closeOrderSuccessModal = () => closeModalShell('order-success-overlay');
+    window.closeOrderSuccessModal = () => {
+        const overlay = document.getElementById('order-success-overlay');
+        const panel = overlay ? overlay.querySelector('.modal-panel') : null;
+        if(panel) {
+            panel.style.opacity = '';
+            panel.style.transform = '';
+        }
+        if(overlay) {
+            overlay.style.opacity = '';
+            overlay.style.pointerEvents = '';
+        }
+        closeModalShell('order-success-overlay');
+    };
     const upsertDefaultAddress = (addressText, shippingPhone = '') => {
         if(!currentUser) return;
         const text = String(addressText || '').trim();
@@ -982,9 +1125,13 @@
         if(!user.orders) user.orders = [];
         if(!Array.isArray(user.addresses)) user.addresses = [];
         const safeStatus = String(user.status || user.customerStatus || '').trim().toLowerCase();
-        user.status = (!safeStatus || safeStatus === 'active' || safeStatus === 'online')
-            ? 'online'
-            : (['offline', 'inactive', 'disabled', 'blocked', 'lock', 'locked'].includes(safeStatus) ? 'offline' : safeStatus);
+        if (!safeStatus || ['active', 'online', 'hoạt động', 'hoat dong', 'đang giao dịch', 'dang giao dich'].includes(safeStatus)) {
+            user.status = 'Hoạt động';
+        } else if (['offline', 'inactive', 'disabled', 'blocked', 'lock', 'locked', 'ngừng hoạt động', 'ngung hoat dong', 'ngừng giao dịch', 'ngung giao dich'].includes(safeStatus)) {
+            user.status = 'Ngừng hoạt động';
+        } else {
+            user.status = String(user.status || user.customerStatus || '').trim() || 'Hoạt động';
+        }
         user.customerStatus = user.status;
         if(typeof user.email !== 'string') user.email = '';
         if(typeof user.phone !== 'string') user.phone = '';
@@ -1081,8 +1228,10 @@
             message = [
                 '<b>Khach moi dang ky tu web</b>',
                 `Ten: <b>${escapeTelegramHtml(payload.name || DEFAULT_GUEST_NAME)}</b>`,
+                `Loai khach: ${escapeTelegramHtml(payload.customerType || payload.group || 'Khách lẻ từ web')}`,
                 `Email: ${escapeTelegramHtml(payload.email || 'Chua cap nhat')}`,
                 `SDT: ${escapeTelegramHtml(payload.phone || 'Chua cap nhat')}`,
+                `Dia chi: ${escapeTelegramHtml(payload.address || 'Chua cap nhat')}`,
                 `Thoi gian: ${escapeTelegramHtml(formatTelegramTimestamp())}`
             ].join('\n');
         } else if(safeType === 'order') {
@@ -1091,19 +1240,34 @@
                 '<b>Don hang moi tu web</b>',
                 `Ma don: <code>${escapeTelegramHtml(payload.orderId || `DH${Date.now()}`)}</code>`,
                 `Khach hang: <b>${escapeTelegramHtml(payload.customerName || DEFAULT_GUEST_NAME)}</b>`,
-                `Loai khach: ${escapeTelegramHtml(payload.customerType || 'guest')}`,
+                `Loai khach: ${escapeTelegramHtml(payload.customerType || payload.group || 'Khách lẻ từ web')}`,
                 `Dia chi: ${escapeTelegramHtml(payload.address || 'Khách sẽ xác nhận qua Zalo')}`,
                 `Lien he: ${escapeTelegramHtml(payload.contact || 'Khách sẽ liên hệ qua Zalo')}`,
                 `Tong tien: <b>${escapeTelegramHtml(formatMoney(payload.finalAmount || 0))}</b>`,
                 'San pham:',
                 ...items.map((item, index) => `${index + 1}. ${escapeTelegramHtml(getProductDisplayName(item))} x${Number(item.quantity || 1) || 1}`)
             ].join('\n');
+        } else if(safeType === 'order-cancel') {
+            message = [
+                '<b>Khach huy don tren web</b>',
+                `Ma don: <code>${escapeTelegramHtml(payload.orderId || `DH${Date.now()}`)}</code>`,
+                `Khach hang: <b>${escapeTelegramHtml(payload.customerName || DEFAULT_GUEST_NAME)}</b>`,
+                `SDT: ${escapeTelegramHtml(payload.phone || 'Chua cap nhat')}`,
+                `Dia chi: ${escapeTelegramHtml(payload.address || 'Chua cap nhat')}`,
+                `Trang thai: ${escapeTelegramHtml(payload.status || 'Da huy boi khach')}`,
+                `Thoi gian: ${escapeTelegramHtml(formatTelegramTimestamp())}`
+            ].join('\n');
         }
         return message ? postTelegramAlert(message) : Promise.resolve(false);
     };
     const hideSearchBar = () => {
         toggleSearchOpen = false;
-        document.getElementById('search-bar').classList.add('-translate-y-full', 'opacity-0', 'pointer-events-none');
+        const searchShell = document.getElementById('search-shell');
+        const searchToggleBtn = document.getElementById('search-toggle-btn');
+        const searchInput = document.getElementById('search-input');
+        if(searchShell) searchShell.classList.remove('is-open');
+        if(searchToggleBtn) searchToggleBtn.setAttribute('aria-expanded', 'false');
+        if(searchInput && document.activeElement === searchInput) searchInput.blur();
     };
     const maskValue = (value, type = 'text') => {
         if(!value) return 'Chưa cập nhật';
@@ -1131,6 +1295,8 @@
     const applyTheme = (theme) => {
         currentTheme = theme === 'dark' ? 'dark' : 'light';
         document.body.classList.toggle('dark-mode', currentTheme === 'dark');
+        document.documentElement.classList.toggle('dark', currentTheme === 'dark');
+        document.documentElement.setAttribute('data-theme', currentTheme);
         const btn = document.getElementById('theme-toggle-btn');
         if(btn) {
             btn.innerHTML = currentTheme === 'dark'
@@ -1142,18 +1308,24 @@
     window.toggleTheme = () => applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
     const toInlineArgument = (value = '') => `'${String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
     const getProductCategoryOptions = () => {
-        const groups = [...new Set((shopProducts || []).map(product => getProductGroupName(product)).filter(Boolean))];
+        const groups = [...new Set((shopProducts || []).flatMap(product => getProductGroupNames(product)).filter(Boolean))];
+        const groupKeys = new Set(groups.map((item) => normalizeKeyword(item)));
+        const sortByCountThenName = (items = []) => items.slice().sort((left, right) => {
+            const countDiff = (Number(right && right.count) || 0) - (Number(left && left.count) || 0);
+            if(countDiff !== 0) return countDiff;
+            return String((left && left.name) || '').localeCompare(String((right && right.name) || ''), 'vi');
+        });
         const rootOptions = groups.map((groupName) => {
-            const productsInGroup = (shopProducts || []).filter((product) => getProductGroupName(product) === groupName);
+            const productsInGroup = (shopProducts || []).filter((product) => getProductGroupNames(product).includes(groupName));
             const groupVisual = getCategoryVisual(groupName);
-            const childTags = [...new Set(productsInGroup.flatMap((product) => getProductVisibleTags(product)).filter((tag) => tag && tag !== groupName))];
+            const childTags = [...new Set(productsInGroup.flatMap((product) => getProductVisibleTags(product)).filter((tag) => tag && !groupKeys.has(normalizeKeyword(tag))))];
             return {
                 name: groupName,
                 icon: groupVisual.icon,
                 color: groupVisual.color,
                 count: productsInGroup.length,
                 preview: ((productsInGroup[0] || {}).img || ''),
-                children: childTags.map((tagName) => {
+                children: sortByCountThenName(childTags.map((tagName) => {
                     const tagVisual = getCategoryVisual(tagName);
                     return {
                         name: tagName,
@@ -1164,7 +1336,7 @@
                         isChild: true,
                         parentName: groupName
                     };
-                })
+                }))
             };
         });
 
@@ -1175,7 +1347,7 @@
             count: shopProducts.length,
             preview: shopProducts[0] ? shopProducts[0].img : '',
             children: []
-        }].concat(rootOptions).filter((item) => item.count > 0 || item.name === 'Tất cả');
+        }].concat(sortByCountThenName(rootOptions)).filter((item) => item.count > 0 || item.name === 'Tất cả');
     };
     const updateProductsCategoryButton = () => {
         const label = document.getElementById('products-category-label');
@@ -1456,15 +1628,22 @@
         window.scrollTo({top: 0, behavior: 'smooth'});
     };
 
+    window.openSearch = () => {
+        const shell = document.getElementById('search-shell');
+        const toggleButton = document.getElementById('search-toggle-btn');
+        const searchInput = document.getElementById('search-input');
+        toggleSearchOpen = true;
+        if(shell) shell.classList.add('is-open');
+        if(toggleButton) toggleButton.setAttribute('aria-expanded', 'true');
+        if(searchInput) searchInput.focus();
+    };
+
     window.toggleSearch = () => {
-        const bar = document.getElementById('search-bar');
-        toggleSearchOpen = !toggleSearchOpen;
-        if(toggleSearchOpen) { 
-            bar.classList.remove('-translate-y-full', 'opacity-0', 'pointer-events-none'); 
-            document.getElementById('search-input').focus(); 
-        } else { 
+        if(toggleSearchOpen) {
             hideSearchBar();
+            return;
         }
+        window.openSearch();
     };
 
     window.handleSearch = (keyword) => {
@@ -1486,6 +1665,7 @@
             goToTab('tab-products');
             if(typeof window.ensureTabInitialized === 'function') window.ensureTabInitialized('tab-products', true);
             else if(typeof window.renderProductsTabContent === 'function') window.renderProductsTabContent();
+            if(kw.length > 0 && typeof window.openSearch === 'function') window.openSearch();
         }
     };
 
@@ -1496,7 +1676,7 @@
         const imageClass = containerId === 'products-tab-grid' ? 'w-full h-36 md:h-52 object-cover rounded-xl mb-3' : 'w-full h-32 md:h-48 object-cover rounded-xl mb-3';
         const emptyClass = containerId === 'products-tab-grid' ? 'col-span-2 md:col-span-4 xl:col-span-5 2xl:col-span-6' : 'col-span-2 md:col-span-4';
         const emptyMessage = productFeedState.error
-            ? `<div class='${emptyClass} text-center py-10 text-red-400'><i class="fa-solid fa-circle-exclamation text-3xl mb-3 block opacity-80"></i><p>${productFeedState.error}</p><p class='text-xs text-gray-400 mt-2'>Kiểm tra catalog public, anonymous auth và file firebase.js đang được nạp mới nhất.</p></div>`
+            ? `<div class='${emptyClass} text-center py-10 text-red-400'><i class="fa-solid fa-circle-exclamation text-3xl mb-3 block opacity-80"></i><p>${productFeedState.error}</p><p class='text-xs text-gray-400 mt-2'>Kiểm tra rules public của catalog_public, router shard 1 và file firebase.js đang được nạp mới nhất.</p></div>`
             : `<div class='${emptyClass} text-center py-10 text-gray-400'>Không tìm thấy sản phẩm phù hợp.</div>`;
         
         container.innerHTML = arr.length ? arr.map(prod => {
@@ -2500,7 +2680,7 @@
         document.getElementById('pd-price').innerText = formatProductPriceLabel(p);
         document.getElementById('pd-name').innerText = getProductDisplayName(p);
         document.getElementById('pd-sold').innerText = '';
-        document.getElementById('pd-desc').innerText = p.desc;
+        document.getElementById('pd-desc').innerText = p.detail_desc || p.description || p.mo_ta || p.desc || '';
         const variantSummaryEl = document.getElementById('pd-variant-summary');
         if(variantSummaryEl) {
             const variantSummary = getProductVariantSummary(p);
