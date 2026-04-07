@@ -48,6 +48,7 @@
     };
 
     const CUSTOMER_PHONE_DOMAIN = String(window.CUSTOMER_PHONE_DOMAIN || "truongan.com").replace(/^@+/, "").trim().toLowerCase();
+    const DEFAULT_WEB_CUSTOMER_GROUP = String(window.DEFAULT_WEB_CUSTOMER_GROUP || "Khách sỉ từ web").trim() || "Khách sỉ từ web";
     const DEFAULT_PAGE_SIZE = 24;
     const DEFAULT_ORDER_LIMIT = 30;
     const LIVE_ORDER_SUMMARY_LIMIT = 40;
@@ -489,7 +490,7 @@
             shippingPhone: String(source.shippingPhone || safePhone).trim(),
             address: safeAddress,
             addresses: ensureAddressList(source.addresses, safeAddress, String(source.customerId || "").trim(), String(source.shippingPhone || safePhone).trim()),
-            group: String(source.group || "Khách lẻ từ web").trim(),
+            group: String(source.group || DEFAULT_WEB_CUSTOMER_GROUP).trim(),
             status: normalizeCustomerStatus(source.status || "Hoạt động"),
             bio: String(source.bio || "An tam chon do tot cho be moi ngay.").trim(),
             gender: String(source.gender || "Chua cap nhat").trim(),
@@ -763,7 +764,7 @@
         const parts = [];
         if (safeGroup) parts.push("Nhóm: " + safeGroup);
         if (safeTags.length) parts.push("Tag: " + safeTags.slice(0, 4).join(" • "));
-        parts.push("Kho: Trường An");
+        parts.push("Kho: " + String(window.STORE_WAREHOUSE_LABEL || "Dị Nậu - Xã Tây Phương - TP. Hà Nội"));
         const fallbackDesc = parts.join(" | ");
         const safeDesc = String(rawDesc || "").trim();
         if (!safeDesc) return fallbackDesc;
@@ -860,7 +861,7 @@
             shippingPhone: String(basic.shipping_phone || basic.shippingPhone || (defaultAddress && defaultAddress.phone) || "").trim(),
             avatar: String(basic.avatar || "").trim(),
             facebook: String(basic.fb || "").trim(),
-            group: String(basic.group || "Khách lẻ từ web").trim(),
+            group: String(basic.group || DEFAULT_WEB_CUSTOMER_GROUP).trim(),
             status: normalizeCustomerStatus(basic.status || "Hoạt động"),
             bio: String(basic.bio || "An tam chon do tot cho be moi ngay."),
             gender: String(basic.gender || "Chua cap nhat"),
@@ -901,7 +902,7 @@
             shipping_phone: shippingPhone,
             avatar: String(safeProfile.avatar || "").trim(),
             fb: String(safeProfile.facebook || "").trim(),
-            group: String(safeProfile.group || "Khách lẻ từ web").trim(),
+            group: String(safeProfile.group || DEFAULT_WEB_CUSTOMER_GROUP).trim(),
             status: normalizeCustomerStatus(safeProfile.status || "Hoạt động"),
             updated_ts: updatedTs,
             bio: String(safeProfile.bio || "").trim(),
@@ -953,7 +954,7 @@
         }
         const authIndex = {
             customer_id: customerId,
-            group: String(safeProfile.group || "Khách lẻ từ web").trim(),
+            group: String(safeProfile.group || DEFAULT_WEB_CUSTOMER_GROUP).trim(),
             updated_ts: updatedTs
         };
         updates["khachhang_auth_index/" + authUid] = authIndex;
@@ -2358,7 +2359,7 @@
             shippingPhone: String(seed.shippingPhone || seed.phone || "").trim(),
             avatar: "",
             facebook: "",
-            group: "Khách lẻ từ web",
+            group: DEFAULT_WEB_CUSTOMER_GROUP,
             status: "Hoạt động",
             bio: "An tam chon do tot cho be moi ngay.",
             gender: "Chua cap nhat",
@@ -2419,7 +2420,7 @@
             email: protectedContacts.email,
             phone: protectedContacts.phone,
             loginMethod: protectedContacts.loginMethod,
-            group: String(merged.group || "Khách lẻ từ web").trim(),
+            group: String(merged.group || DEFAULT_WEB_CUSTOMER_GROUP).trim(),
             status: normalizeCustomerStatus(merged.status || "Hoạt động"),
             bio: String(merged.bio || (existing && existing.bio) || "An tam chon do tot cho be moi ngay.").trim(),
             gender: String(merged.gender || (existing && existing.gender) || "Chua cap nhat").trim(),
@@ -2525,6 +2526,25 @@
         return service.loginWithGoogle();
     };
 
+    async function postGasJsonPayload_(gasUrl, payload) {
+        const response = await fetch(gasUrl, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify(payload || {})
+        });
+        const text = await response.text();
+        let result = {};
+        try {
+            result = text ? JSON.parse(text) : {};
+        } catch (error) {
+            throw new Error("guest-order-json-invalid");
+        }
+        if (!response.ok || result.status !== "success") {
+            throw new Error(String(result.message || "guest-order-failed"));
+        }
+        return result;
+    }
+
     async function submitGuestOrderViaGas_(payload) {
         const data = payload || {};
         const rawItems = Array.isArray(data.items) ? data.items : [];
@@ -2604,25 +2624,11 @@
         const gasUrl = String(gasConfig.gasUrl || "").trim();
         if (!gasUrl) throw new Error("gas-backend-missing");
 
-        const response = await fetch(gasUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                action: "new_order",
-                allow_guest: true,
-                data: orderInfo
-            })
+        await postGasJsonPayload_(gasUrl, {
+            action: "new_order",
+            allow_guest: true,
+            data: orderInfo
         });
-        const text = await response.text();
-        let result = {};
-        try {
-            result = text ? JSON.parse(text) : {};
-        } catch (error) {
-            throw new Error("guest-order-json-invalid");
-        }
-        if (!response.ok || result.status !== "success") {
-            throw new Error(String(result.message || "guest-order-failed"));
-        }
 
         return {
             id: orderId,
@@ -2731,26 +2737,11 @@
         const gasUrl = String(gasConfig.gasUrl || "").trim();
         if (!gasUrl) throw new Error("gas-backend-missing");
 
-        const response = await fetch(gasUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                action: "new_order",
-                allow_guest: true,
-                data: orderInfo
-            })
+        return postGasJsonPayload_(gasUrl, {
+            action: "new_order",
+            allow_guest: true,
+            data: orderInfo
         });
-        const text = await response.text();
-        let result = {};
-        try {
-            result = text ? JSON.parse(text) : {};
-        } catch (error) {
-            throw new Error("guest-order-json-invalid");
-        }
-        if (!response.ok || result.status !== "success") {
-            throw new Error(String(result.message || "guest-order-failed"));
-        }
-        return result;
     }
 
     function buildCachedOrderInfoFromSummary_(summary, authUser) {

@@ -3,14 +3,13 @@
     // amount: tong tien don hang, percent: phan tram giam, label: nhan hien thi tren web.
     // Muon tat hoan toan tinh nang nay, doi DISCOUNT_TIERS thanh [].
     var DISCOUNT_TIERS = [
-        { amount: 500000, percent: 5, label: "Chiết khấu 5%" },
-        { amount: 1000000, percent: 7, label: "Chiết khấu 7%" },
-        { amount: 2000000, percent: 10, label: "Chiết khấu 10%" },
-        { amount: 5000000, percent: 15, label: "Chiết khấu 15%" },
-        { amount: 10000000, percent: 20, label: "Chiết khấu 20%" }
+        { amount: 1000000, percent: 1, label: "Chiết khấu 1%" },
+        { amount: 5000000, percent: 3, label: "Chiết khấu 3%" },
+        
     ];
     var EDIT_ORDER_STORAGE_KEY = "ta_editing_order_v1";
     var editingOrderState = null;
+    var cartQtyDraftMap = {};
 
     function getBridge() {
         return window.webNewAppBridge || {};
@@ -102,6 +101,25 @@
     function clearEditingOrderState() {
         editingOrderState = null;
         persistEditingOrderState();
+    }
+
+    function setCartQtyDraftValue(cartId, value) {
+        var safeCartId = String(cartId || "").trim();
+        if (!safeCartId) return;
+        cartQtyDraftMap[safeCartId] = String(value == null ? "" : value).replace(/[^\d]/g, "");
+    }
+
+    function getCartQtyDraftValue(cartId) {
+        var safeCartId = String(cartId || "").trim();
+        if (!safeCartId) return "";
+        if (!Object.prototype.hasOwnProperty.call(cartQtyDraftMap, safeCartId)) return "";
+        return String(cartQtyDraftMap[safeCartId] || "");
+    }
+
+    function clearCartQtyDraftValue(cartId) {
+        var safeCartId = String(cartId || "").trim();
+        if (!safeCartId) return;
+        delete cartQtyDraftMap[safeCartId];
     }
 
     function isProductInStock(product) {
@@ -394,6 +412,7 @@
     window.updateCartQty = function (cartId, delta) {
         var safeCartId = String(cartId || "").trim();
         if (!safeCartId) return;
+        clearCartQtyDraftValue(safeCartId);
 
         var nextCart = [];
         getCartItems().forEach(function (item) {
@@ -413,9 +432,14 @@
         syncCartState(nextCart);
     };
 
+    window.setCartQtyDraft = function (cartId, value) {
+        setCartQtyDraftValue(cartId, value);
+    };
+
     window.setCartQtyInput = function (cartId, value) {
         var safeCartId = String(cartId || "").trim();
         if (!safeCartId) return;
+        clearCartQtyDraftValue(safeCartId);
 
         var nextCart = getCartItems().map(function (item) {
             if (!item || String(item.cartId || "") !== safeCartId) return item;
@@ -427,6 +451,17 @@
         });
 
         syncCartState(nextCart);
+    };
+
+    window.commitCartQtyInput = function (cartId, value) {
+        window.setCartQtyInput(cartId, value);
+    };
+
+    window.handleCartQtyInputKeydown = function (event, cartId, value) {
+        if (!event || event.key !== "Enter") return;
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        window.commitCartQtyInput(cartId, value);
+        if (event.target && typeof event.target.blur === "function") event.target.blur();
     };
 
     window.startCartOrderEdit = function (payload) {
@@ -506,6 +541,8 @@
             var imageUrl = bridge.getOptimizedImageUrl ? bridge.getOptimizedImageUrl(item.img, "w400") : String(item.img || "");
             var displayName = getProductDisplayName(item);
             var safeCartId = String(item.cartId || "").replace(/'/g, "\\'");
+            var qtyInputValue = getCartQtyDraftValue(item.cartId);
+            if (!qtyInputValue) qtyInputValue = String(quantity);
             return [
                 "<div class=\"flex items-start gap-3 bg-white p-3 rounded-xl border border-gray-100 relative\">",
                 "    <button onclick=\"updateCartQty('" + safeCartId + "', -999)\" class=\"absolute top-2 right-2 text-gray-300 hover:text-red-500\"><i class=\"fa-solid fa-xmark\"></i></button>",
@@ -522,7 +559,7 @@
                 "            </div>",
                 "            <div class=\"qty-stepper qty-stepper-sm\">",
                 "                <button class=\"qty-stepper-btn\" onclick=\"updateCartQty('" + safeCartId + "', -1)\"><i class=\"fa-solid fa-minus text-[10px]\"></i></button>",
-                "                <input class=\"qty-stepper-input text-sm\" type=\"number\" min=\"" + minQty + "\" step=\"1\" value=\"" + quantity + "\" oninput=\"setCartQtyInput('" + safeCartId + "', this.value)\"/>",
+                "                <input class=\"qty-stepper-input text-sm\" type=\"number\" min=\"" + minQty + "\" step=\"1\" value=\"" + qtyInputValue + "\" oninput=\"setCartQtyDraft('" + safeCartId + "', this.value)\" onblur=\"commitCartQtyInput('" + safeCartId + "', this.value)\" onkeydown=\"handleCartQtyInputKeydown(event, '" + safeCartId + "', this.value)\"/>",
                 "                <button class=\"qty-stepper-btn\" onclick=\"updateCartQty('" + safeCartId + "', 1)\"><i class=\"fa-solid fa-plus text-[10px]\"></i></button>",
                 "            </div>",
                 "        </div>",

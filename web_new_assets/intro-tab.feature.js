@@ -1,5 +1,7 @@
 (function () {
     var STYLE_ID = 'intro-tab-feature-styles';
+    var SHARED_MAP_URL = window.STORE_MAP_URL || 'https://maps.app.goo.gl/uvE9CiNHheZyWP55A';
+    var SHARED_WAREHOUSE_LABEL = window.STORE_WAREHOUSE_LABEL || 'Di Nau - Xa Tay Phuong - TP. Ha Noi';
     var defaultConfig = {
         hero: {
             badge: 'Trường An Store',
@@ -30,8 +32,8 @@
         storeInfo: {
             name: 'Trường An Store',
             summary: 'Chuyên nhóm hàng mẹ và bé, đồ chơi, quà tặng và sản phẩm bán sỉ cho cộng tác viên.',
-            address: 'Cập nhật địa chỉ thật của cửa hàng tại đây.',
-            mapUrl: 'https://maps.google.com/?q=Truong+An+Store',
+            address: SHARED_WAREHOUSE_LABEL,
+            mapUrl: SHARED_MAP_URL,
             openHours: '08:00 - 21:00 mỗi ngày'
         },
         gallery: [
@@ -39,19 +41,19 @@
                 image: 'https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?auto=format&fit=crop&w=1400&q=80',
                 title: 'Không gian mua sắm cho mẹ và bé',
                 caption: 'Ảnh banner chính cho phần giới thiệu.',
-                link: 'https://maps.google.com/?q=Truong+An+Store'
+                link: SHARED_MAP_URL
             },
             {
                 image: 'https://images.unsplash.com/photo-1514090458221-65bb69cf63e6?auto=format&fit=crop&w=1200&q=80',
                 title: 'Khu đồ chơi nổi bật',
                 caption: 'Có thể thay bằng ảnh thật trong shop.',
-                link: 'https://maps.google.com/?q=Truong+An+Store'
+                link: SHARED_MAP_URL
             },
             {
                 image: 'https://images.unsplash.com/photo-1519689680058-324335c77eba?auto=format&fit=crop&w=1200&q=80',
                 title: 'Nhóm hàng mẹ và bé',
                 caption: 'Dùng để giới thiệu nhóm sản phẩm chủ lực.',
-                link: 'https://maps.google.com/?q=Truong+An+Store'
+                link: SHARED_MAP_URL
             }
         ],
         welcomePopup: {
@@ -333,7 +335,7 @@
         ensureStyles();
 
         if (badge) badge.innerText = popup.badge || 'Ưu đãi đầu trang';
-        if (title) title.innerText = popup.title || 'Thông báo nhanh';
+        if (title) title.innerText = popup.title || '';
 
         body.innerHTML = [
             "<div class='intro-popup-card'>",

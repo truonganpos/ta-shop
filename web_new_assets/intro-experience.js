@@ -1,5 +1,7 @@
 (function () {
     var STYLE_ID = 'ta-intro-experience-styles';
+    var SHARED_MAP_URL = window.STORE_MAP_URL || 'https://maps.app.goo.gl/uvE9CiNHheZyWP55A';
+    var SHARED_WAREHOUSE_LABEL = window.STORE_WAREHOUSE_LABEL || 'Di Nau - Xa Tay Phuong - TP. Ha Noi';
 
     function ensureStyles() {
         if (document.getElementById(STYLE_ID)) return;
@@ -79,8 +81,8 @@
         storeInfo: {
             name: "Trường An Store",
             summary: "Siêu thị Mẹ & Bé, Đồ chơi giáo dục cao cấp.",
-            address: "123 Đường Cầu Giấy, Phường Dịch Vọng, Hà Nội",
-            mapUrl: "https://maps.google.com/?q=Truong+An+Store",
+            address: SHARED_WAREHOUSE_LABEL,
+            mapUrl: SHARED_MAP_URL,
             openHours: "08:00 - 21:30 (Thứ 2 - Chủ Nhật)"
         },
         gallery: [
@@ -94,8 +96,8 @@
             subtitle: "Đăng ký thành viên ngay hôm nay để mở khóa đặc quyền dành riêng cho bạn và bé.",
             lines: [
                 "Tặng ngay Voucher 50K cho đơn hàng đầu tiên.",
-                "Miễn phí vận chuyển toàn quốc mọi đơn từ 300K.",
-                "Tích điểm, thăng hạng VIP và nhận quà sinh nhật."
+                "Sỉ từ đơn hàng từ 1 triệu trở lên. Chiết khấu 1% cho đơn hàng từ 2 Triệu",
+                "Tích điểm, quản lí đơn hàng minh bạch, đầy đủ."
             ],
             trustNote: "Hơn 10.000+ mẹ bỉm đã tin chọn Trường An Store",
             primaryLabel: "Đăng ký nhận quà ngay",

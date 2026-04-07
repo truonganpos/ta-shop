@@ -1045,9 +1045,9 @@
         const stockEl = document.getElementById('pd-stock-value');
         if(stockEl) stockEl.innerText = String(typeof p.availableStock === 'number' ? p.availableStock : (typeof p.stock === 'number' ? p.stock : 0));
         const warehouseEl = document.getElementById('pd-warehouse-value');
-        if(warehouseEl) warehouseEl.innerHTML = `<i class='fa-solid fa-location-dot text-babyPink'></i> Trường An`;
+        if(warehouseEl) warehouseEl.innerHTML = `<i class='fa-solid fa-location-dot text-babyPink'></i> ${window.STORE_WAREHOUSE_LABEL || 'Dị Nậu - Xã Tây Phương - TP. Hà Nội'}`;
         const detailDescription = String(p.detail_desc || p.description || p.mo_ta || p.desc || '').trim();
-        const detailMetaLine = [getProductGroupName(p) ? `Nhóm: ${getProductGroupName(p).toLocaleUpperCase('vi-VN')}` : '', 'Kho: Trường An']
+        const detailMetaLine = [getProductGroupName(p) ? `Nhóm: ${getProductGroupName(p).toLocaleUpperCase('vi-VN')}` : '', `Kho: ${window.STORE_WAREHOUSE_LABEL || 'Dị Nậu - Xã Tây Phương - TP. Hà Nội'}`]
             .filter(Boolean)
             .join(' | ');
         document.getElementById('pd-desc').innerText = detailDescription

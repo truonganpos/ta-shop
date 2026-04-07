@@ -45,15 +45,17 @@
         "'": '&#39;'
     }[char] || char));
     window.escapeHtml = window.escapeHtml || escapeHtml;
-// Đổi 1 lần tại đây để cập nhật số liên hệ và Zalo toàn web.
-    const STORE_CONTACT_PHONE = window.STORE_CONTACT_PHONE || '0989441685';
+// Đổi 1 lần tại đây để cập nhật số liên hệ, Zalo, kho và link hỗ trợ toàn web.
+    const STORE_CONTACT_PHONE = window.STORE_CONTACT_PHONE || '0971388340';
     const STORE_ZALO_PHONE = window.STORE_ZALO_PHONE || STORE_CONTACT_PHONE;
     const ORDER_SUPPORT_ZALO_PHONE = window.ORDER_SUPPORT_ZALO_PHONE || STORE_ZALO_PHONE;
     const PASSWORD_RESET_ZALO_PHONE = window.PASSWORD_RESET_ZALO_PHONE || STORE_ZALO_PHONE;
     const STORE_FACEBOOK_URL = window.STORE_FACEBOOK_URL || 'https://www.facebook.com/';
-    const STORE_ZALO_GROUP_URL = window.STORE_ZALO_GROUP_URL || '';
+    const STORE_ZALO_GROUP_URL = window.STORE_ZALO_GROUP_URL || 'https://zalo.me/g/bceitz651';
     const STORE_EMAIL_ADDRESS = window.STORE_EMAIL_ADDRESS || 'truonganstore@gmail.com';
-    const STORE_MAP_URL = window.STORE_MAP_URL || 'https://maps.google.com/?q=Trường+An+Store';
+    const STORE_MAP_URL = window.STORE_MAP_URL || 'https://maps.app.goo.gl/uvE9CiNHheZyWP55A';
+    const STORE_WAREHOUSE_LABEL = window.STORE_WAREHOUSE_LABEL || 'Dị Nậu - Xã Tây Phương - TP. Hà Nội';
+    const DEFAULT_WEB_CUSTOMER_GROUP = String(window.DEFAULT_WEB_CUSTOMER_GROUP || 'Khách sỉ từ web').trim() || 'Khách sỉ từ web';
     const DEFAULT_GUEST_NAME = 'Khách Lẻ Web';
     const SHORTCUT_PROMPT_DELAY_MS = Number(window.SHORTCUT_PROMPT_DELAY_MS || 90000);
     const SHORTCUT_PROMPT_AFTER_LOGIN_MS = Number(window.SHORTCUT_PROMPT_AFTER_LOGIN_MS || 8000);
@@ -126,6 +128,7 @@
     };
     window.openStoreFacebook = () => openExternalUrl(STORE_FACEBOOK_URL, () => openStoreZalo());
     window.openStoreZaloGroup = () => openExternalUrl(STORE_ZALO_GROUP_URL, () => openStoreZalo('', ORDER_SUPPORT_ZALO_PHONE));
+    window.openStoreMap = () => openExternalUrl(STORE_MAP_URL, () => openStoreZalo('', ORDER_SUPPORT_ZALO_PHONE));
     window.openStoreEmail = () => {
         const safeEmail = String(STORE_EMAIL_ADDRESS || '').trim();
         if(safeEmail) {
@@ -397,10 +400,22 @@
         }, 180);
         return safeUrl;
     };
+    const isMissingImageValue = (raw = '') => {
+        const safeValue = String(raw || '').trim();
+        if(!safeValue) return true;
+        return /via\.placeholder\.com/i.test(safeValue);
+    };
+    const renderMissingImageHtml = (className = '', options = {}) => {
+        const pictureClass = escapeHtml(String(options.pictureClass || 'block').trim());
+        const wrapperClass = ['product-image-missing', className].filter(Boolean).join(' ');
+        const altText = escapeHtml(String(options.alt || 'Ảnh sản phẩm đang cập nhật').trim() || 'Ảnh sản phẩm đang cập nhật');
+        const idAttr = options.id ? ` id="${escapeHtml(String(options.id).trim())}"` : '';
+        return `<picture class="${pictureClass}">${`<div${idAttr} class="${escapeHtml(wrapperClass)}" role="img" aria-label="${altText}"><span class="product-image-missing__label">Đang cập nhật</span></div>`}</picture>`;
+    };
     const finalizeOptimizedImageUrl = (url = '') => {
         const safeUrl = String(url || '').trim();
         if(safeUrl) warmImageLocalCache(safeUrl);
-        return safeUrl || 'https://via.placeholder.com/600x600?text=No+Image';
+        return safeUrl;
     };
     const getExplicitWebpImageUrl = (raw, size = 'w800') => {
         const value = String(raw || '').trim();
@@ -417,7 +432,7 @@
     };
     const getOptimizedImageUrl = (raw, size = 'w800') => {
         const value = String(raw || '').trim();
-        if(!value) return 'https://via.placeholder.com/600x600?text=No+Image';
+        if(isMissingImageValue(value)) return '';
         if(value.startsWith('data:image')) return value;
         if(/^https?:\/\/res\.cloudinary\.com\//i.test(value) && value.includes('/image/upload/')) {
             const widthMatch = String(size || '').match(/w(\d+)/i);
@@ -432,6 +447,7 @@
         return finalizeOptimizedImageUrl(`https://drive.google.com/thumbnail?id=${driveId}&sz=${size}`);
     };
     const renderResponsiveImageHtml = (raw, size = 'w800', className = '', options = {}) => {
+        if(isMissingImageValue(raw)) return renderMissingImageHtml(className, options);
         const src = getOptimizedImageUrl(raw, size);
         const webpSrc = getExplicitWebpImageUrl(raw, size);
         const pictureClass = escapeHtml(String(options.pictureClass || 'block').trim());
@@ -572,7 +588,7 @@
         const safeGroupLabel = groupNames.length ? groupNames.join(' • ').toLocaleUpperCase('vi-VN') : '';
         const parts = [];
         if(safeGroupLabel) parts.push(`Nhóm: ${safeGroupLabel}`);
-        parts.push('Kho: Trường An');
+        parts.push(`Kho: ${STORE_WAREHOUSE_LABEL}`);
         const fallbackDesc = parts.join(' | ');
         const safeDesc = String(rawDesc || '').trim();
         if(!safeDesc) return fallbackDesc;
@@ -793,7 +809,7 @@
         const group = String(groups[0] || posProduct.group || posProduct.Group || '').trim();
         const code = String(posProduct.ma_sp || posProduct.code || posProduct.Code || posProduct.sku || posProduct.SKU || posProduct.id || posProduct.ID || `POS_${index + 1}`).trim();
         const updatedTs = Number(posProduct.updated_ts || posProduct.updatedAt || posProduct.UpdatedTs || 0) || 0;
-        const firstImage = images[0] ? getOptimizedImageUrl(images[0], 'w800') : 'https://via.placeholder.com/600x600?text=Product';
+        const firstImage = images[0] ? getOptimizedImageUrl(images[0], 'w800') : '';
         const variants = mapPosVariants(posProduct);
         const unit = String(posProduct.dvt || posProduct.unit || posProduct.don_vi || posProduct.don_vi_tinh || posProduct['Don vi tinh'] || posProduct['Đơn vị tính'] || '').trim();
         const groupKeys = new Set(groups.map((item) => normalizeKeyword(item)));
@@ -1655,7 +1671,7 @@
             message = [
                 '<b>Khach moi dang ky tu web</b>',
                 `Ten: <b>${escapeTelegramHtml(payload.name || DEFAULT_GUEST_NAME)}</b>`,
-                `Loai khach: ${escapeTelegramHtml(payload.customerType || payload.group || 'Khách lẻ từ web')}`,
+            `Loai khach: ${escapeTelegramHtml(payload.customerType || payload.group || DEFAULT_WEB_CUSTOMER_GROUP)}`,
                 `Email: ${escapeTelegramHtml(payload.email || 'Chua cap nhat')}`,
                 `SDT: ${escapeTelegramHtml(payload.phone || 'Chua cap nhat')}`,
                 `Dia chi: ${escapeTelegramHtml(payload.address || 'Chua cap nhat')}`,
@@ -1667,7 +1683,7 @@
                 '<b>Don hang moi tu web</b>',
                 `Ma don: <code>${escapeTelegramHtml(payload.orderId || `DH${Date.now()}`)}</code>`,
                 `Khach hang: <b>${escapeTelegramHtml(payload.customerName || DEFAULT_GUEST_NAME)}</b>`,
-                `Loai khach: ${escapeTelegramHtml(payload.customerType || payload.group || 'Khách lẻ từ web')}`,
+            `Loai khach: ${escapeTelegramHtml(payload.customerType || payload.group || DEFAULT_WEB_CUSTOMER_GROUP)}`,
                 `Dia chi: ${escapeTelegramHtml(payload.address || 'Khách sẽ xác nhận qua Zalo')}`,
                 `Lien he: ${escapeTelegramHtml(payload.contact || 'Khách sẽ liên hệ qua Zalo')}`,
                 `Tong tien: <b>${escapeTelegramHtml(formatMoney(payload.finalAmount || 0))}</b>`,
